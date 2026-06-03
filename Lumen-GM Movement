@@ -1,11 +1,18 @@
 {
-    "name": "PL_Generic_Full_Load_FINSIGHT",
+    "name": "PL_GENERIC_INGEST_WATERMARK_INCREMENTAL_FINSIGHT",
     "properties": {
         "activities": [
             {
-                "name": "Get Metadata Of Previous Files",
-                "type": "GetMetadata",
-                "dependsOn": [],
+                "name": "Lookup Previous Watermark Value finsight",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "If Current Version Exists finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
                 "policy": {
                     "timeout": "0.12:00:00",
                     "retry": 0,
@@ -15,39 +22,27 @@
                 },
                 "userProperties": [],
                 "typeProperties": {
+                    "source": {
+                        "type": "SqlServerSource",
+                        "sqlReaderQuery": {
+                            "value": "select * from dbo.table_store_watermark_value where AdfJobName= '@{pipeline().parameters.AdfJobName}'",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
                     "dataset": {
-                        "referenceName": "Azure_Databricks_LandingZone",
-                        "type": "DatasetReference",
-                        "parameters": {
-                            "ADLSStoragePath": {
-                                "value": "@concat('/external_archival/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
-                                "type": "Expression"
-                            },
-                            "ADLSContainerName": {
-                                "value": "@pipeline().parameters.ADLSContainerName",
-                                "type": "Expression"
-                            }
-                        }
-                    },
-                    "fieldList": [
-                        "exists"
-                    ],
-                    "storeSettings": {
-                        "type": "AzureBlobFSReadSettings",
-                        "recursive": true,
-                        "enablePartitionDiscovery": false
-                    },
-                    "formatSettings": {
-                        "type": "ParquetReadSettings"
+                        "referenceName": "DS_SQL_Config41",
+                        "type": "DatasetReference"
                     }
                 }
             },
             {
-                "name": "SourceType",
+                "name": "SourceType finsight",
                 "type": "Switch",
                 "dependsOn": [
                     {
-                        "activity": "IF Current Folder Exists",
+                        "activity": "Lookup Previous Watermark Value finsight",
                         "dependencyConditions": [
                             "Succeeded"
                         ]
@@ -64,175 +59,11 @@
                             "value": "ORACLE",
                             "activities": [
                                 {
-                                    "name": "Insert Log Success ORACLE",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS ORACLE",
-                                            "dependencyConditions": [
-                                                "Succeeded"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE').output.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Sucess",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE').output.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Insert Log Failure ORACLE",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS ORACLE",
-                                            "dependencyConditions": [
-                                                "Failed"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE').output?.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Failure",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE').output?.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Copy data to ADLS ORACLE",
+                                    "name": "Copy data to Staging Oracle finsight",
                                     "type": "Copy",
                                     "dependsOn": [
                                         {
-                                            "activity": "Get recs count and min max",
+                                            "activity": "Lookup Current Watermark Value ORACLE finsight",
                                             "dependencyConditions": [
                                                 "Succeeded"
                                             ]
@@ -250,24 +81,10 @@
                                         "source": {
                                             "type": "OracleSource",
                                             "oracleReaderQuery": {
-                                                "value": "SELECT sql.* FROM (@{pipeline().parameters.SourceQuery}) sql WHERE ?AdfRangePartitionColumnName <= ?AdfRangePartitionUpbound AND ?AdfRangePartitionColumnName >= ?AdfRangePartitionLowbound",
+                                                "value": "@concat(\n    if(\n        contains(pipeline().parameters.SourceQuery, '[watermark]'),\n        replace(\n            pipeline().parameters.SourceQuery,\n            '[watermark]',\n            replace(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 'T', ' ')\n        ),\n        concat(\n            pipeline().parameters.SourceQuery,\n            ' and ',\n            pipeline().parameters.SourceTableName, '.', pipeline().parameters.WaterMarkColumnName,\n            ' > TO_DATE(SUBSTR(''',\n                replace(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 'T', ' '),\n            ''', 1, 19), ''YYYY-MM-DD HH24:MI:SS'')'\n        )\n    )\n)",
                                                 "type": "Expression"
                                             },
-                                            "partitionOption": "DynamicRange",
-                                            "partitionSettings": {
-                                                "partitionColumnName": {
-                                                    "value": "@{pipeline().parameters.PartitionColumnName}",
-                                                    "type": "Expression"
-                                                },
-                                                "partitionUpperBound": {
-                                                    "value": "@{activity('Get recs count and min max').output.firstRow.PartitionUpperBound}",
-                                                    "type": "Expression"
-                                                },
-                                                "partitionLowerBound": {
-                                                    "value": "@{activity('Get recs count and min max').output.firstRow.PartitionLowerBound}",
-                                                    "type": "Expression"
-                                                }
-                                            },
+                                            "partitionOption": "None",
                                             "convertDecimalToInteger": false,
                                             "queryTimeout": "02:00:00"
                                         },
@@ -282,10 +99,6 @@
                                             }
                                         },
                                         "enableStaging": false,
-                                        "parallelCopies": {
-                                            "value": "@int(activity('Get recs count and min max').output.firstRow.parallelCopies)",
-                                            "type": "Expression"
-                                        },
                                         "translator": {
                                             "type": "TabularTranslator",
                                             "typeConversion": true,
@@ -337,6 +150,302 @@
                                             "type": "DatasetReference",
                                             "parameters": {
                                                 "ADLSStoragePath": {
+                                                    "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                                    "type": "Expression"
+                                                },
+                                                "ADLSContainerName": {
+                                                    "value": "@pipeline().parameters.ADLSContainerName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Insert Log Success Oracle finsight",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Update WaterMark Value Oracle finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[InsertLog]",
+                                        "storedProcedureParameters": {
+                                            "BronzeCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle finsight').output.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "DbName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceDBName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "RunStatus": {
+                                                "value": "Sucess",
+                                                "type": "String"
+                                            },
+                                            "ServerName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "SourceCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle finsight').output.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "error": {
+                                                "value": "",
+                                                "type": "String"
+                                            },
+                                            "AdfJobName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.AdfJobName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                        "type": "LinkedServiceReference"
+                                    }
+                                },
+                                {
+                                    "name": "Insert Log Failure Oracle finsight",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy data to Staging Oracle finsight",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[InsertLog]",
+                                        "storedProcedureParameters": {
+                                            "BronzeCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle finsight').output?.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "DbName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceDBName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "RunStatus": {
+                                                "value": "Failure",
+                                                "type": "String"
+                                            },
+                                            "ServerName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "SourceCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle finsight').output?.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "error": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle finsight').error?.message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AdfJobName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.AdfJobName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                        "type": "LinkedServiceReference"
+                                    }
+                                },
+                                {
+                                    "name": "Update WaterMark Value Oracle finsight",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy data to Staging Oracle finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[Update_WaterMark_Value]",
+                                        "storedProcedureParameters": {
+                                            "AdfJobName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.AdfJobName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "watermark": {
+                                                "value": {
+                                                    "value": "@activity('Lookup Current Watermark Value ORACLE finsight').output.firstRow.NewWatermarkvalue",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                        "type": "LinkedServiceReference"
+                                    }
+                                },
+                                {
+                                    "name": "Copy data to ADLS from Staging Oracle",
+                                    "type": "Copy",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Update WaterMark Value Oracle finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "source": {
+                                            "type": "ParquetSource",
+                                            "storeSettings": {
+                                                "type": "AzureBlobFSReadSettings",
+                                                "recursive": true,
+                                                "wildcardFileName": "*.parquet",
+                                                "enablePartitionDiscovery": false
+                                            },
+                                            "formatSettings": {
+                                                "type": "ParquetReadSettings"
+                                            }
+                                        },
+                                        "sink": {
+                                            "type": "ParquetSink",
+                                            "storeSettings": {
+                                                "type": "AzureBlobFSWriteSettings",
+                                                "blockSizeInMB": 100
+                                            },
+                                            "formatSettings": {
+                                                "type": "ParquetWriteSettings"
+                                            }
+                                        },
+                                        "enableStaging": false,
+                                        "translator": {
+                                            "type": "TabularTranslator",
+                                            "typeConversion": true,
+                                            "typeConversionSettings": {
+                                                "allowDataTruncation": true,
+                                                "treatBooleanAsNumber": false
+                                            }
+                                        }
+                                    },
+                                    "inputs": [
+                                        {
+                                            "referenceName": "Azure_Databricks_LandingZone",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "ADLSStoragePath": {
+                                                    "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                                    "type": "Expression"
+                                                },
+                                                "ADLSContainerName": {
+                                                    "value": "@pipeline().parameters.ADLSContainerName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "outputs": [
+                                        {
+                                            "referenceName": "Azure_Databricks_LandingZone",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "ADLSStoragePath": {
                                                     "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
                                                     "type": "Expression"
                                                 },
@@ -349,7 +458,7 @@
                                     ]
                                 },
                                 {
-                                    "name": "Get recs count and min max",
+                                    "name": "Lookup Current Watermark Value ORACLE finsight",
                                     "type": "Lookup",
                                     "dependsOn": [],
                                     "policy": {
@@ -364,7 +473,7 @@
                                         "source": {
                                             "type": "OracleSource",
                                             "oracleReaderQuery": {
-                                                "value": "select case when count(1)>40000000 then 10 when count(1) >10000000 then 8 when count(1)>1000000 then 6 else 4 end as parallelCopies, count(1) as sourceRecCount,min(@{pipeline().parameters.PartitionColumnName}) as PartitionLowerBound,max(@{pipeline().parameters.PartitionColumnName}) as PartitionUpperBound from (@{pipeline().parameters.SourceQuery}) sql",
+                                                "value": "@concat(\n  'select MAX(',\n  replace(toLower(pipeline().parameters.WaterMarkColumnName), 'table1.', ''),\n  ') as NewWatermarkvalue from ',\n  if(\n    equals(pipeline().parameters.SourceSchemaName, ''),\n    '',\n    concat(pipeline().parameters.SourceSchemaName, '.')\n  ),\n  pipeline().parameters.SourceTableName\n)",
                                                 "type": "Expression"
                                             },
                                             "partitionOption": "None",
@@ -408,11 +517,11 @@
                                     }
                                 },
                                 {
-                                    "name": "Trigger DLT Job Oracle",
+                                    "name": "Trigger DLT Job Oracle finsight",
                                     "type": "WebActivity",
                                     "dependsOn": [
                                         {
-                                            "activity": "Insert Log Success ORACLE",
+                                            "activity": "Copy data to ADLS from Staging Oracle",
                                             "dependencyConditions": [
                                                 "Succeeded"
                                             ]
@@ -453,11 +562,11 @@
                             "value": "SQLSERVER",
                             "activities": [
                                 {
-                                    "name": "Insert Log Success SQLSERVER",
-                                    "type": "SqlServerStoredProcedure",
+                                    "name": "Copy data to Staging SQLSERVER finsight",
+                                    "type": "Copy",
                                     "dependsOn": [
                                         {
-                                            "activity": "Copy data to ADLS SQLSERVER",
+                                            "activity": "Lookup Current Watermark Value SQLSERVER finsight",
                                             "dependencyConditions": [
                                                 "Succeeded"
                                             ]
@@ -465,164 +574,7 @@
                                     ],
                                     "policy": {
                                         "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER').output.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Sucess",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER').output.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Insert Log Failure SQLSERVER",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS SQLSERVER",
-                                            "dependencyConditions": [
-                                                "Failed"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER').output?.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Failure",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER').output?.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Copy data to ADLS SQLSERVER",
-                                    "type": "Copy",
-                                    "dependsOn": [],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
+                                        "retry": 6,
                                         "retryIntervalInSeconds": 30,
                                         "secureOutput": false,
                                         "secureInput": false
@@ -632,7 +584,7 @@
                                         "source": {
                                             "type": "SqlServerSource",
                                             "sqlReaderQuery": {
-                                                "value": "@pipeline().parameters.SourceQuery",
+                                                "value": "@concat(\n    if(\n        contains(pipeline().parameters.SourceQuery, '[watermark]'),\n        replace(\n            pipeline().parameters.SourceQuery,\n            '[watermark]',\n            replace(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 'T', ' ')\n        ),\n        concat(\n            pipeline().parameters.SourceQuery,\n            ' and ',\n            pipeline().parameters.SourceTableName, '.', pipeline().parameters.WaterMarkColumnName,\n            ' > TO_DATE(SUBSTR(''',\n                replace(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 'T', ' '),\n            ''', 1, 19), ''YYYY-MM-DD HH24:MI:SS'')'\n        )\n    )\n)",
                                                 "type": "Expression"
                                             },
                                             "queryTimeout": "02:00:00",
@@ -688,7 +640,7 @@
                                             "type": "DatasetReference",
                                             "parameters": {
                                                 "ADLSStoragePath": {
-                                                    "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                                    "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
                                                     "type": "Expression"
                                                 },
                                                 "ADLSContainerName": {
@@ -700,56 +652,11 @@
                                     ]
                                 },
                                 {
-                                    "name": "Trigger DLT Job Oracle SQLSERVER",
-                                    "type": "WebActivity",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Insert Log Success SQLSERVER",
-                                            "dependencyConditions": [
-                                                "Succeeded"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "method": "POST",
-                                        "url": "https://adb-740797236825868.8.azuredatabricks.net/api/2.1/jobs/run-now",
-                                        "connectVia": {
-                                            "referenceName": "shir-sub-dlhfinance-dev-01",
-                                            "type": "IntegrationRuntimeReference"
-                                        },
-                                        "body": {
-                                            "value": "{\"job_id\":@{pipeline().parameters.JobId}}",
-                                            "type": "Expression"
-                                        },
-                                        "authentication": {
-                                            "resource": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d",
-                                            "credential": {
-                                                "referenceName": "spn_dev_dlhfinance",
-                                                "type": "CredentialReference"
-                                            },
-                                            "userTenant": "72b17115-9915-42c0-9f1b-4f98e5a4bcd2"
-                                        }
-                                    }
-                                }
-                            ]
-                        },
-                        {
-                            "value": "SQLSERVERWINDOWSAUTHENTICATION",
-                            "activities": [
-                                {
-                                    "name": "Insert Log Success SQLSERVER_WA",
+                                    "name": "Insert Log Success SQLSERVER finsight",
                                     "type": "SqlServerStoredProcedure",
                                     "dependsOn": [
                                         {
-                                            "activity": "Copy data to ADLS SQLSERVER_WA",
+                                            "activity": "Update WaterMark Value SQLSERVER finsight",
                                             "dependencyConditions": [
                                                 "Succeeded"
                                             ]
@@ -768,14 +675,14 @@
                                         "storedProcedureParameters": {
                                             "BronzeCount": {
                                                 "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_WA').output.rowsCopied",
+                                                    "value": "@activity('Copy data to Staging SQLSERVER finsight').output.rowsCopied",
                                                     "type": "Expression"
                                                 },
                                                 "type": "Int64"
                                             },
                                             "DbName": {
                                                 "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
+                                                    "value": "@pipeline().parameters.SourceDBName",
                                                     "type": "Expression"
                                                 },
                                                 "type": "String"
@@ -793,23 +700,20 @@
                                             },
                                             "SourceCount": {
                                                 "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_WA').output.rowsRead",
+                                                    "value": "@activity('Copy data to Staging SQLSERVER finsight').output.rowsRead",
                                                     "type": "Expression"
                                                 },
                                                 "type": "Int64"
                                             },
                                             "TableName": {
                                                 "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
+                                                    "value": "@pipeline().parameters.SourceTableName",
                                                     "type": "Expression"
                                                 },
                                                 "type": "String"
                                             },
                                             "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_WA').error?.message",
-                                                    "type": "Expression"
-                                                },
+                                                "value": "",
                                                 "type": "String"
                                             },
                                             "AdfJobName": {
@@ -827,11 +731,11 @@
                                     }
                                 },
                                 {
-                                    "name": "Insert Log Failure SQLSERVER_WA",
+                                    "name": "Insert Log Failure SQLSERVER finsight",
                                     "type": "SqlServerStoredProcedure",
                                     "dependsOn": [
                                         {
-                                            "activity": "Copy data to ADLS SQLSERVER_WA",
+                                            "activity": "Copy data to Staging SQLSERVER finsight",
                                             "dependencyConditions": [
                                                 "Failed"
                                             ]
@@ -850,14 +754,14 @@
                                         "storedProcedureParameters": {
                                             "BronzeCount": {
                                                 "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_WA').output?.rowsCopied",
+                                                    "value": "@activity('Copy data to Staging SQLSERVER finsight').output?.rowsCopied",
                                                     "type": "Expression"
                                                 },
                                                 "type": "Int64"
                                             },
                                             "DbName": {
                                                 "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
+                                                    "value": "@pipeline().parameters.SourceDBName",
                                                     "type": "Expression"
                                                 },
                                                 "type": "String"
@@ -875,21 +779,21 @@
                                             },
                                             "SourceCount": {
                                                 "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_WA').output?.rowsRead",
+                                                    "value": "@activity('Copy data to Staging SQLSERVER finsight').output?.rowsRead",
                                                     "type": "Expression"
                                                 },
                                                 "type": "Int64"
                                             },
                                             "TableName": {
                                                 "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
+                                                    "value": "@pipeline().parameters.SourceTableName",
                                                     "type": "Expression"
                                                 },
                                                 "type": "String"
                                             },
                                             "error": {
                                                 "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_WA').error?.message",
+                                                    "value": "@activity('Copy data to Staging SQLSERVER finsight').error?.message",
                                                     "type": "Expression"
                                                 },
                                                 "type": "String"
@@ -909,9 +813,66 @@
                                     }
                                 },
                                 {
-                                    "name": "Copy data to ADLS SQLSERVER_WA",
+                                    "name": "Update WaterMark Value SQLSERVER finsight",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy data to Staging SQLSERVER finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[Update_WaterMark_Value]",
+                                        "storedProcedureParameters": {
+                                            "AdfJobName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.AdfJobName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "watermark": {
+                                                "value": {
+                                                    "value": "@activity('Lookup Current Watermark Value SQLSERVER finsight').output.firstRow.NewWatermarkvalue",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                        "type": "LinkedServiceReference"
+                                    }
+                                },
+                                {
+                                    "name": "Copy data to ADLS from Staging SQLSERVER finsight",
                                     "type": "Copy",
-                                    "dependsOn": [],
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Update WaterMark Value SQLSERVER finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
                                     "policy": {
                                         "timeout": "0.12:00:00",
                                         "retry": 0,
@@ -922,13 +883,16 @@
                                     "userProperties": [],
                                     "typeProperties": {
                                         "source": {
-                                            "type": "SqlServerSource",
-                                            "sqlReaderQuery": {
-                                                "value": "@pipeline().parameters.SourceQuery",
-                                                "type": "Expression"
+                                            "type": "ParquetSource",
+                                            "storeSettings": {
+                                                "type": "AzureBlobFSReadSettings",
+                                                "recursive": true,
+                                                "wildcardFileName": "*.parquet",
+                                                "enablePartitionDiscovery": false
                                             },
-                                            "queryTimeout": "02:00:00",
-                                            "partitionOption": "None"
+                                            "formatSettings": {
+                                                "type": "ParquetReadSettings"
+                                            }
                                         },
                                         "sink": {
                                             "type": "ParquetSink",
@@ -952,23 +916,15 @@
                                     },
                                     "inputs": [
                                         {
-                                            "referenceName": "DS_SQL_Generic_Windows_Authentication",
+                                            "referenceName": "Azure_Databricks_LandingZone",
                                             "type": "DatasetReference",
                                             "parameters": {
-                                                "ServerName": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
+                                                "ADLSStoragePath": {
+                                                    "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
                                                     "type": "Expression"
                                                 },
-                                                "DatabaseName": {
-                                                    "value": "@pipeline().parameters.SourceDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserName": {
-                                                    "value": "@pipeline().parameters.SourceDBuserName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserKey": {
-                                                    "value": "@pipeline().parameters.UserKey",
+                                                "ADLSContainerName": {
+                                                    "value": "@pipeline().parameters.ADLSContainerName",
                                                     "type": "Expression"
                                                 }
                                             }
@@ -992,11 +948,57 @@
                                     ]
                                 },
                                 {
-                                    "name": "Trigger DLT Job Oracle SQLSERVER_WA",
+                                    "name": "Lookup Current Watermark Value SQLSERVER finsight",
+                                    "type": "Lookup",
+                                    "dependsOn": [],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "source": {
+                                            "type": "SqlServerSource",
+                                            "sqlReaderQuery": {
+                                                "value": "select MAX(@{pipeline().parameters.WaterMarkColumnName}) as NewWatermarkvalue from @{pipeline().parameters.SourceSchemaName}.@{pipeline().parameters.SourceTableName}",
+                                                "type": "Expression"
+                                            },
+                                            "queryTimeout": "02:00:00",
+                                            "partitionOption": "None"
+                                        },
+                                        "dataset": {
+                                            "referenceName": "DS_SQL_Generic",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "ServerName": {
+                                                    "value": "@pipeline().parameters.SourceServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "DatabaseName": {
+                                                    "value": "@pipeline().parameters.SourceDBName",
+                                                    "type": "Expression"
+                                                },
+                                                "UserName": {
+                                                    "value": "@pipeline().parameters.SourceDBuserName",
+                                                    "type": "Expression"
+                                                },
+                                                "UserKey": {
+                                                    "value": "@pipeline().parameters.UserKey",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "Trigger DLT Job Oracle SQLSERVER finsight",
                                     "type": "WebActivity",
                                     "dependsOn": [
                                         {
-                                            "activity": "Insert Log Success SQLSERVER_WA",
+                                            "activity": "Copy data to ADLS from Staging SQLSERVER finsight",
                                             "dependencyConditions": [
                                                 "Succeeded"
                                             ]
@@ -1037,175 +1039,11 @@
                             "value": "ORACLE_STG",
                             "activities": [
                                 {
-                                    "name": "Insert Log Success ORACLE stg",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS ORACLE stg",
-                                            "dependencyConditions": [
-                                                "Succeeded"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg').output.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Sucess",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg').output.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Insert Log Failure ORACLE stg",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS ORACLE stg",
-                                            "dependencyConditions": [
-                                                "Failed"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg').output?.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Failure",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg').output?.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Copy data to ADLS ORACLE stg",
+                                    "name": "Copy data to Staging Oracle_stg finsight",
                                     "type": "Copy",
                                     "dependsOn": [
                                         {
-                                            "activity": "Get recs count and min max stg",
+                                            "activity": "Lookup Current Watermark Value ORACLE_stg finsight",
                                             "dependencyConditions": [
                                                 "Succeeded"
                                             ]
@@ -1223,24 +1061,10 @@
                                         "source": {
                                             "type": "OracleSource",
                                             "oracleReaderQuery": {
-                                                "value": "SELECT sql.* FROM (@{pipeline().parameters.SourceQuery}) sql WHERE ?AdfRangePartitionColumnName <= ?AdfRangePartitionUpbound AND ?AdfRangePartitionColumnName >= ?AdfRangePartitionLowbound",
+                                                "value": "@concat(\n    if(\n        contains(pipeline().parameters.SourceQuery, '[watermark]'),\n        replace(\n            pipeline().parameters.SourceQuery,\n            '[watermark]',\n            replace(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 'T', ' ')\n        ),\n        concat(\n            pipeline().parameters.SourceQuery,\n            ' and ',\n            pipeline().parameters.SourceTableName, '.', pipeline().parameters.WaterMarkColumnName,\n            ' > TO_DATE(SUBSTR(''',\n                replace(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 'T', ' '),\n            ''', 1, 19), ''YYYY-MM-DD HH24:MI:SS'')'\n        )\n    )\n)",
                                                 "type": "Expression"
                                             },
-                                            "partitionOption": "DynamicRange",
-                                            "partitionSettings": {
-                                                "partitionColumnName": {
-                                                    "value": "@{pipeline().parameters.PartitionColumnName}",
-                                                    "type": "Expression"
-                                                },
-                                                "partitionUpperBound": {
-                                                    "value": "@{activity('Get recs count and min max stg').output.firstRow.PartitionUpperBound}",
-                                                    "type": "Expression"
-                                                },
-                                                "partitionLowerBound": {
-                                                    "value": "@{activity('Get recs count and min max stg').output.firstRow.PartitionLowerBound}",
-                                                    "type": "Expression"
-                                                }
-                                            },
+                                            "partitionOption": "None",
                                             "convertDecimalToInteger": false,
                                             "queryTimeout": "02:00:00"
                                         },
@@ -1255,10 +1079,6 @@
                                             }
                                         },
                                         "enableStaging": false,
-                                        "parallelCopies": {
-                                            "value": "@int(activity('Get recs count and min max stg').output.firstRow.parallelCopies)",
-                                            "type": "Expression"
-                                        },
                                         "translator": {
                                             "type": "TabularTranslator",
                                             "typeConversion": true,
@@ -1310,6 +1130,302 @@
                                             "type": "DatasetReference",
                                             "parameters": {
                                                 "ADLSStoragePath": {
+                                                    "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                                    "type": "Expression"
+                                                },
+                                                "ADLSContainerName": {
+                                                    "value": "@pipeline().parameters.ADLSContainerName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Insert Log Success Oracle_stg finsight",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Update WaterMark Value Oracle_stg finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[InsertLog]",
+                                        "storedProcedureParameters": {
+                                            "BronzeCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle_stg finsight').output.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "DbName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceDBName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "RunStatus": {
+                                                "value": "Sucess",
+                                                "type": "String"
+                                            },
+                                            "ServerName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "SourceCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle_stg finsight').output.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "error": {
+                                                "value": "",
+                                                "type": "String"
+                                            },
+                                            "AdfJobName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.AdfJobName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                        "type": "LinkedServiceReference"
+                                    }
+                                },
+                                {
+                                    "name": "Insert Log Failure Oracle_stg finsight",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy data to Staging Oracle_stg finsight",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[InsertLog]",
+                                        "storedProcedureParameters": {
+                                            "BronzeCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle_stg finsight').output?.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "DbName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceDBName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "RunStatus": {
+                                                "value": "Failure",
+                                                "type": "String"
+                                            },
+                                            "ServerName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "SourceCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle_stg finsight').output?.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int64"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "error": {
+                                                "value": {
+                                                    "value": "@activity('Copy data to Staging Oracle_stg finsight').error?.message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AdfJobName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.AdfJobName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                        "type": "LinkedServiceReference"
+                                    }
+                                },
+                                {
+                                    "name": "Update WaterMark Value Oracle_stg finsight",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy data to Staging Oracle_stg finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[Update_WaterMark_Value]",
+                                        "storedProcedureParameters": {
+                                            "AdfJobName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.AdfJobName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.SourceTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "watermark": {
+                                                "value": {
+                                                    "value": "@activity('Lookup Current Watermark Value ORACLE_stg finsight').output.firstRow.NewWatermarkvalue",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                        "type": "LinkedServiceReference"
+                                    }
+                                },
+                                {
+                                    "name": "Copy data to ADLS from Staging Oracle_stg  finsight",
+                                    "type": "Copy",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Update WaterMark Value Oracle_stg finsight",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "0.12:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "source": {
+                                            "type": "ParquetSource",
+                                            "storeSettings": {
+                                                "type": "AzureBlobFSReadSettings",
+                                                "recursive": true,
+                                                "wildcardFileName": "*.parquet",
+                                                "enablePartitionDiscovery": false
+                                            },
+                                            "formatSettings": {
+                                                "type": "ParquetReadSettings"
+                                            }
+                                        },
+                                        "sink": {
+                                            "type": "ParquetSink",
+                                            "storeSettings": {
+                                                "type": "AzureBlobFSWriteSettings",
+                                                "blockSizeInMB": 100
+                                            },
+                                            "formatSettings": {
+                                                "type": "ParquetWriteSettings"
+                                            }
+                                        },
+                                        "enableStaging": false,
+                                        "translator": {
+                                            "type": "TabularTranslator",
+                                            "typeConversion": true,
+                                            "typeConversionSettings": {
+                                                "allowDataTruncation": true,
+                                                "treatBooleanAsNumber": false
+                                            }
+                                        }
+                                    },
+                                    "inputs": [
+                                        {
+                                            "referenceName": "Azure_Databricks_LandingZone",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "ADLSStoragePath": {
+                                                    "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                                    "type": "Expression"
+                                                },
+                                                "ADLSContainerName": {
+                                                    "value": "@pipeline().parameters.ADLSContainerName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "outputs": [
+                                        {
+                                            "referenceName": "Azure_Databricks_LandingZone",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "ADLSStoragePath": {
                                                     "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
                                                     "type": "Expression"
                                                 },
@@ -1322,7 +1438,7 @@
                                     ]
                                 },
                                 {
-                                    "name": "Get recs count and min max stg",
+                                    "name": "Lookup Current Watermark Value ORACLE_stg finsight",
                                     "type": "Lookup",
                                     "dependsOn": [],
                                     "policy": {
@@ -1337,7 +1453,7 @@
                                         "source": {
                                             "type": "OracleSource",
                                             "oracleReaderQuery": {
-                                                "value": "select case when count(1)>40000000 then 10 when count(1) >10000000 then 8 when count(1)>1000000 then 6 else 4 end as parallelCopies, count(1) as sourceRecCount,min(@{pipeline().parameters.PartitionColumnName}) as PartitionLowerBound,max(@{pipeline().parameters.PartitionColumnName}) as PartitionUpperBound from (@{pipeline().parameters.SourceQuery}) sql",
+                                                "value": "select MAX(@{pipeline().parameters.WaterMarkColumnName}) as NewWatermarkvalue from @{pipeline().parameters.SourceSchemaName}.@{pipeline().parameters.SourceTableName}",
                                                 "type": "Expression"
                                             },
                                             "partitionOption": "None",
@@ -1377,647 +1493,6 @@
                                                     "type": "Expression"
                                                 }
                                             }
-                                        }
-                                    }
-                                }
-                            ]
-                        },
-                        {
-                            "value": "SQLSERVER_STG",
-                            "activities": [
-                                {
-                                    "name": "Insert Log Success SQLSERVER_STG",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS SQLSERVER_STG",
-                                            "dependencyConditions": [
-                                                "Succeeded"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_STG').output.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Sucess",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_STG').output.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_STG').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Insert Log Failure SQLSERVER_STG",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS SQLSERVER_STG",
-                                            "dependencyConditions": [
-                                                "Failed"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_STG').output?.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Failure",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_STG').output?.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS SQLSERVER_STG').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Copy data to ADLS SQLSERVER_STG",
-                                    "type": "Copy",
-                                    "dependsOn": [],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "source": {
-                                            "type": "SqlServerSource",
-                                            "sqlReaderQuery": {
-                                                "value": "\nSELECT \n    o.customer_order_id,\n    sub.sbf_service_id,\n    sub.service_id,\n    sub.sbf_order_id,\n    sub.ses_part_id,\n    sub.PCID,\n    sub.install_date,\n    sub.bill_start_date,\n    sub.bill_stop_date,\n    sub.config_name,\n    sub.lookup_service_action_id,\n    sub.lookup_service_status_id,\n    sub.lookup_service_provisioning_status_id,\n    sub.billing_package_id,\n    sub.emf_config_id,\n    sub.disconnect_reason_code,\n    sub.rate_class,\n    sub.created_by,\n    sub.created_date,\n    sub.last_updated_by,\n    sub.last_updated_date,\n    sub.transaction_id,\n    sub.xml_created_date,\n    sub.lookup_audit_status_id,\n    sub.assigned_auditor,\n    sub.auditor_assigned_date,\n    sub.last_updated_date_by_auditor,\n    sub.last_updated_by_auditor\nFROM (\n    SELECT *\n    FROM sbf_service AS a WITH (NOLOCK)\n    WHERE SUBSTRING(a.service_id, 11, 5) = '**Wil'\n      AND a.sbf_service_id = (\n            SELECT MAX(b.sbf_service_id)\n            FROM sbf_service AS b WITH (NOLOCK)\n            WHERE b.service_id = a.service_id\n        )\n      AND a.ses_part_id IN (\n            SELECT DISTINCT sp.ses_part_id\n            FROM ses_part AS sp WITH (NOLOCK)\n            WHERE sp.source_system IN ('WILTEL', 'SIEBEL')\n        )\n      AND a.last_updated_date >= '2006-01-01T00:00:00'\n      AND a.last_updated_date <= '2013-12-31T23:59:59'\n) AS sub\nLEFT JOIN sbf_order AS o WITH (NOLOCK)\n    ON sub.sbf_order_id = o.sbf_order_id;\n   ",
-                                                "type": "Expression"
-                                            },
-                                            "queryTimeout": "02:00:00",
-                                            "partitionOption": "None"
-                                        },
-                                        "sink": {
-                                            "type": "ParquetSink",
-                                            "storeSettings": {
-                                                "type": "AzureBlobFSWriteSettings",
-                                                "blockSizeInMB": 100
-                                            },
-                                            "formatSettings": {
-                                                "type": "ParquetWriteSettings"
-                                            }
-                                        },
-                                        "enableStaging": false,
-                                        "translator": {
-                                            "type": "TabularTranslator",
-                                            "typeConversion": true,
-                                            "typeConversionSettings": {
-                                                "allowDataTruncation": true,
-                                                "treatBooleanAsNumber": false
-                                            }
-                                        }
-                                    },
-                                    "inputs": [
-                                        {
-                                            "referenceName": "DS_SQL_Generic",
-                                            "type": "DatasetReference",
-                                            "parameters": {
-                                                "ServerName": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "DatabaseName": {
-                                                    "value": "@pipeline().parameters.SourceDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserName": {
-                                                    "value": "@pipeline().parameters.SourceDBuserName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserKey": {
-                                                    "value": "@pipeline().parameters.UserKey",
-                                                    "type": "Expression"
-                                                }
-                                            }
-                                        }
-                                    ],
-                                    "outputs": [
-                                        {
-                                            "referenceName": "Azure_Databricks_LandingZone",
-                                            "type": "DatasetReference",
-                                            "parameters": {
-                                                "ADLSStoragePath": {
-                                                    "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
-                                                    "type": "Expression"
-                                                },
-                                                "ADLSContainerName": {
-                                                    "value": "@pipeline().parameters.ADLSContainerName",
-                                                    "type": "Expression"
-                                                }
-                                            }
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                        {
-                            "value": "ORACLE_STG_NB",
-                            "activities": [
-                                {
-                                    "name": "Insert Log Success ORACLE  stg_NB",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS ORACLE stg_NB",
-                                            "dependencyConditions": [
-                                                "Succeeded"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg_NB').output.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Sucess",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg_NB').output.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg_NB').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Insert Log Failure ORACLE stg_NB",
-                                    "type": "SqlServerStoredProcedure",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS ORACLE stg_NB",
-                                            "dependencyConditions": [
-                                                "Failed"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "storedProcedureName": "[dbo].[InsertLog]",
-                                        "storedProcedureParameters": {
-                                            "BronzeCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg_NB').output?.rowsCopied",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "DbName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "RunStatus": {
-                                                "value": "Failure",
-                                                "type": "String"
-                                            },
-                                            "ServerName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "SourceCount": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg_NB').output?.rowsRead",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "Int64"
-                                            },
-                                            "TableName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.TargetTableName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "error": {
-                                                "value": {
-                                                    "value": "@activity('Copy data to ADLS ORACLE stg_NB').error?.message",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            },
-                                            "AdfJobName": {
-                                                "value": {
-                                                    "value": "@pipeline().parameters.AdfJobName",
-                                                    "type": "Expression"
-                                                },
-                                                "type": "String"
-                                            }
-                                        }
-                                    },
-                                    "linkedServiceName": {
-                                        "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
-                                        "type": "LinkedServiceReference"
-                                    }
-                                },
-                                {
-                                    "name": "Copy data to ADLS ORACLE stg_NB",
-                                    "type": "Copy",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Get res count and min max stg_NB",
-                                            "dependencyConditions": [
-                                                "Succeeded"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "source": {
-                                            "type": "OracleSource",
-                                            "oracleReaderQuery": {
-                                                "value": "SELECT sql.* FROM (@{pipeline().parameters.SourceQuery}) sql WHERE ?AdfRangePartitionColumnName <= ?AdfRangePartitionUpbound AND ?AdfRangePartitionColumnName >= ?AdfRangePartitionLowbound",
-                                                "type": "Expression"
-                                            },
-                                            "partitionOption": "DynamicRange",
-                                            "partitionSettings": {
-                                                "partitionColumnName": {
-                                                    "value": "@{pipeline().parameters.PartitionColumnName}",
-                                                    "type": "Expression"
-                                                },
-                                                "partitionUpperBound": {
-                                                    "value": "@{activity('Get res count and min max stg_NB').output.firstRow.PartitionUpperBound}",
-                                                    "type": "Expression"
-                                                },
-                                                "partitionLowerBound": {
-                                                    "value": "@{activity('Get res count and min max stg_NB').output.firstRow.PartitionLowerBound}",
-                                                    "type": "Expression"
-                                                }
-                                            },
-                                            "convertDecimalToInteger": false,
-                                            "queryTimeout": "02:00:00"
-                                        },
-                                        "sink": {
-                                            "type": "ParquetSink",
-                                            "storeSettings": {
-                                                "type": "AzureBlobFSWriteSettings",
-                                                "blockSizeInMB": 100
-                                            },
-                                            "formatSettings": {
-                                                "type": "ParquetWriteSettings"
-                                            }
-                                        },
-                                        "enableStaging": false,
-                                        "parallelCopies": {
-                                            "value": "@int(activity('Get res count and min max stg_NB').output.firstRow.parallelCopies)",
-                                            "type": "Expression"
-                                        },
-                                        "translator": {
-                                            "type": "TabularTranslator",
-                                            "typeConversion": true,
-                                            "typeConversionSettings": {
-                                                "allowDataTruncation": true,
-                                                "treatBooleanAsNumber": false
-                                            }
-                                        }
-                                    },
-                                    "inputs": [
-                                        {
-                                            "referenceName": "Oracle_Generic",
-                                            "type": "DatasetReference",
-                                            "parameters": {
-                                                "HostName": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "PortNumber": {
-                                                    "value": "@pipeline().parameters.PortNumber",
-                                                    "type": "Expression"
-                                                },
-                                                "ServiceName": {
-                                                    "value": "@pipeline().parameters.ServiceName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserName": {
-                                                    "value": "@pipeline().parameters.SourceDBuserName",
-                                                    "type": "Expression"
-                                                },
-                                                "SourceType": {
-                                                    "value": "@pipeline().parameters.SourceType",
-                                                    "type": "Expression"
-                                                },
-                                                "SourceDBName": {
-                                                    "value": "@pipeline().parameters.SourceDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserKey": {
-                                                    "value": "@pipeline().parameters.UserKey",
-                                                    "type": "Expression"
-                                                }
-                                            }
-                                        }
-                                    ],
-                                    "outputs": [
-                                        {
-                                            "referenceName": "Azure_Databricks_LandingZone",
-                                            "type": "DatasetReference",
-                                            "parameters": {
-                                                "ADLSStoragePath": {
-                                                    "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
-                                                    "type": "Expression"
-                                                },
-                                                "ADLSContainerName": {
-                                                    "value": "@pipeline().parameters.ADLSContainerName",
-                                                    "type": "Expression"
-                                                }
-                                            }
-                                        }
-                                    ]
-                                },
-                                {
-                                    "name": "Get res count and min max stg_NB",
-                                    "type": "Lookup",
-                                    "dependsOn": [],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "source": {
-                                            "type": "OracleSource",
-                                            "oracleReaderQuery": {
-                                                "value": "select case when count(1)>40000000 then 10 when count(1) >10000000 then 8 when count(1)>1000000 then 6 else 4 end as parallelCopies, count(1) as sourceRecCount,min(@{pipeline().parameters.PartitionColumnName}) as PartitionLowerBound,max(@{pipeline().parameters.PartitionColumnName}) as PartitionUpperBound from (@{pipeline().parameters.SourceQuery}) sql",
-                                                "type": "Expression"
-                                            },
-                                            "partitionOption": "None",
-                                            "convertDecimalToInteger": false,
-                                            "queryTimeout": "02:00:00"
-                                        },
-                                        "dataset": {
-                                            "referenceName": "Oracle_Generic",
-                                            "type": "DatasetReference",
-                                            "parameters": {
-                                                "HostName": {
-                                                    "value": "@pipeline().parameters.SourceServerName",
-                                                    "type": "Expression"
-                                                },
-                                                "PortNumber": {
-                                                    "value": "@pipeline().parameters.PortNumber",
-                                                    "type": "Expression"
-                                                },
-                                                "ServiceName": {
-                                                    "value": "@pipeline().parameters.ServiceName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserName": {
-                                                    "value": "@pipeline().parameters.SourceDBuserName",
-                                                    "type": "Expression"
-                                                },
-                                                "SourceType": {
-                                                    "value": "@pipeline().parameters.SourceType",
-                                                    "type": "Expression"
-                                                },
-                                                "SourceDBName": {
-                                                    "value": "@pipeline().parameters.SourceDBName",
-                                                    "type": "Expression"
-                                                },
-                                                "UserKey": {
-                                                    "value": "@pipeline().parameters.UserKey",
-                                                    "type": "Expression"
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                                {
-                                    "name": "Trigger DLT Job Oracle_NB",
-                                    "type": "WebActivity",
-                                    "dependsOn": [
-                                        {
-                                            "activity": "Copy data to ADLS ORACLE stg_NB",
-                                            "dependencyConditions": [
-                                                "Succeeded"
-                                            ]
-                                        }
-                                    ],
-                                    "policy": {
-                                        "timeout": "0.12:00:00",
-                                        "retry": 0,
-                                        "retryIntervalInSeconds": 30,
-                                        "secureOutput": false,
-                                        "secureInput": false
-                                    },
-                                    "userProperties": [],
-                                    "typeProperties": {
-                                        "method": "POST",
-                                        "url": "https://adb-740797236825868.8.azuredatabricks.net/api/2.1/jobs/run-now",
-                                        "connectVia": {
-                                            "referenceName": "shir-sub-dlhfinance-dev-01",
-                                            "type": "IntegrationRuntimeReference"
-                                        },
-                                        "body": {
-                                            "value": "{\"job_id\":@{pipeline().parameters.JobId}}",
-                                            "type": "Expression"
-                                        },
-                                        "authentication": {
-                                            "resource": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d",
-                                            "credential": {
-                                                "referenceName": "spn_dev_dlhfinance",
-                                                "type": "CredentialReference"
-                                            },
-                                            "userTenant": "72b17115-9915-42c0-9f1b-4f98e5a4bcd2"
                                         }
                                     }
                                 }
@@ -2027,56 +1502,13 @@
                 }
             },
             {
-                "name": "Delete Archived Files",
-                "type": "Delete",
-                "dependsOn": [
-                    {
-                        "activity": "Get Metadata Of Previous Files",
-                        "dependencyConditions": [
-                            "Succeeded"
-                        ]
-                    }
-                ],
-                "policy": {
-                    "timeout": "0.12:00:00",
-                    "retry": 0,
-                    "retryIntervalInSeconds": 30,
-                    "secureOutput": false,
-                    "secureInput": false
-                },
-                "userProperties": [],
-                "typeProperties": {
-                    "dataset": {
-                        "referenceName": "Azure_Databricks_LandingZone",
-                        "type": "DatasetReference",
-                        "parameters": {
-                            "ADLSStoragePath": {
-                                "value": "@concat('/external_archival/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
-                                "type": "Expression"
-                            },
-                            "ADLSContainerName": {
-                                "value": "@pipeline().parameters.ADLSContainerName",
-                                "type": "Expression"
-                            }
-                        }
-                    },
-                    "enableLogging": false,
-                    "storeSettings": {
-                        "type": "AzureBlobFSReadSettings",
-                        "recursive": true,
-                        "wildcardFileName": "*",
-                        "enablePartitionDiscovery": false
-                    }
-                }
-            },
-            {
-                "name": "Get Metadata of Current Version",
+                "name": "Get Metadata of Current Version finsight",
                 "type": "GetMetadata",
                 "dependsOn": [
                     {
-                        "activity": "Delete Archived Files",
+                        "activity": "If Staging Exists finsight",
                         "dependencyConditions": [
-                            "Completed"
+                            "Succeeded"
                         ]
                     }
                 ],
@@ -2117,11 +1549,51 @@
                 }
             },
             {
-                "name": "IF Current Folder Exists",
+                "name": "Get Metadata of Staging Version finsight",
+                "type": "GetMetadata",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "dataset": {
+                        "referenceName": "Azure_Databricks_LandingZone",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "ADLSStoragePath": {
+                                "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                "type": "Expression"
+                            },
+                            "ADLSContainerName": {
+                                "value": "@pipeline().parameters.ADLSContainerName",
+                                "type": "Expression"
+                            }
+                        }
+                    },
+                    "fieldList": [
+                        "exists"
+                    ],
+                    "storeSettings": {
+                        "type": "AzureBlobFSReadSettings",
+                        "recursive": true,
+                        "enablePartitionDiscovery": false
+                    },
+                    "formatSettings": {
+                        "type": "ParquetReadSettings"
+                    }
+                }
+            },
+            {
+                "name": "If Staging Exists finsight",
                 "type": "IfCondition",
                 "dependsOn": [
                     {
-                        "activity": "Get Metadata of Current Version",
+                        "activity": "Get Metadata of Staging Version finsight",
                         "dependencyConditions": [
                             "Succeeded"
                         ]
@@ -2130,12 +1602,70 @@
                 "userProperties": [],
                 "typeProperties": {
                     "expression": {
-                        "value": "@activity('Get Metadata of Current Version').output.exists",
+                        "value": "@activity('Get Metadata of Staging Version finsight').output.exists",
                         "type": "Expression"
                     },
                     "ifTrueActivities": [
                         {
-                            "name": "Move Current Version to Archived",
+                            "name": "Delete Staging Version finsight",
+                            "description": "Empty Staging Directory",
+                            "type": "Delete",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "dataset": {
+                                    "referenceName": "Azure_Databricks_LandingZone",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "ADLSStoragePath": {
+                                            "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                            "type": "Expression"
+                                        },
+                                        "ADLSContainerName": {
+                                            "value": "@pipeline().parameters.ADLSContainerName",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                },
+                                "enableLogging": false,
+                                "storeSettings": {
+                                    "type": "AzureBlobFSReadSettings",
+                                    "recursive": true,
+                                    "wildcardFileName": "*",
+                                    "enablePartitionDiscovery": false
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "If Current Version Exists finsight",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Get Metadata of Current Version finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@activity('Get Metadata of Current Version finsight').output.exists",
+                        "type": "Expression"
+                    },
+                    "ifTrueActivities": [
+                        {
+                            "name": "Move Current Version to Archived finsight",
                             "type": "Copy",
                             "dependsOn": [],
                             "policy": {
@@ -2216,11 +1746,11 @@
                             ]
                         },
                         {
-                            "name": "Delete Current Version",
+                            "name": "Delete Current Version finsight",
                             "type": "Delete",
                             "dependsOn": [
                                 {
-                                    "activity": "Move Current Version to Archived",
+                                    "activity": "Move Current Version to Archived finsight",
                                     "dependencyConditions": [
                                         "Succeeded"
                                     ]
@@ -2269,35 +1799,30 @@
             },
             "SourceDBName": {
                 "type": "string",
-                "defaultValue": "sqldbpoctrain"
+                "defaultValue": "POC"
+            },
+            "SourceTableName": {
+                "type": "string",
+                "defaultValue": "project_table"
             },
             "ADLSContainerName": {
                 "type": "string",
                 "defaultValue": "landingbronze"
             },
-            "PartitionUpperBound": {
+            "WaterMarkColumnName": {
                 "type": "string",
-                "defaultValue": "2023-12-31T19:16:53Z"
-            },
-            "PartitionLowerBound": {
-                "type": "string",
-                "defaultValue": "2008-12-31T19:16:53Z"
-            },
-            "PartitionColumnName": {
-                "type": "string",
-                "defaultValue": "lpep_pickup_datetime"
-            },
-            "SourceType": {
-                "type": "string",
-                "defaultValue": "ORACLE"
+                "defaultValue": "Creationtime"
             },
             "PortNumber": {
                 "type": "string"
             },
-            "ServiceName": {
+            "SourceType": {
                 "type": "string"
             },
             "SourceDBuserName": {
+                "type": "string"
+            },
+            "ServiceName": {
                 "type": "string"
             },
             "TargetDBName": {
@@ -2315,10 +1840,7 @@
             "SourceQuery": {
                 "type": "string"
             },
-            "SourceTableName": {
-                "type": "string"
-            },
-            "JobId": {
+            "SourceSchemaName": {
                 "type": "string"
             },
             "ClientId": {
@@ -2326,13 +1848,16 @@
             },
             "AdfJobName": {
                 "type": "string"
+            },
+            "JobId": {
+                "type": "string"
             }
         },
         "folder": {
             "name": "FINSIGHT"
         },
         "annotations": [],
-        "lastPublishTime": "2026-06-02T22:51:59Z"
+        "lastPublishTime": "2026-06-02T22:52:01Z"
     },
     "type": "Microsoft.DataFactory/factories/pipelines"
 }
