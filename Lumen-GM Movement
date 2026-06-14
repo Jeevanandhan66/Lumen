@@ -1,1 +1,76 @@
 
+# SQL Server BACPAC Backup - One Backup Per Day
+
+$server = "srv-sqldlhfinancedev-01.database.windows.net"
+$database = "db-sqldlhfinancedev-01"
+
+$backupPath = "C:\Users\AD67767\OneDrive - Lumen\Documents\FinSight\DBBackups"
+
+$username = "sqladmin"
+$password = "YOUR_PASSWORD"
+
+# Create backup folder
+
+if (-not (Test-Path $backupPath)) {
+New-Item -Path $backupPath -ItemType Directory | Out-Null
+}
+
+# Check whether today's backup already exists
+
+$today = Get-Date -Format "yyyyMMdd"
+
+$existingBackup = Get-ChildItem `    -Path $backupPath`
+-ErrorAction SilentlyContinue | Where-Object {
+$*.Name -like "$database`*$today*.bacpac"
+}
+
+if ($existingBackup) {
+Write-Host ""
+Write-Host "Today's backup already exists. Skipping."
+
+```
+exit 0
+```
+
+}
+
+# Build output filename
+
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+$file = "$backupPath$database`_$timestamp.bacpac"
+
+# Export database
+
+sqlpackage `/Action:Export`
+/SourceServerName:$server `/SourceDatabaseName:$database`
+/SourceUser:$username `/SourcePassword:$password`
+/TargetFile:$file `/SourceEncryptConnection:True`
+/SourceTrustServerCertificate:True
+
+# Verify export
+
+if ($LASTEXITCODE -eq 0)
+{
+Write-Host ""
+Write-Host "Backup completed:"
+Write-Host $file
+}
+else
+{
+Write-Host ""
+Write-Host "Backup failed."
+
+```
+exit 1
+```
+
+}
+
+# Delete backups older than 30 days
+
+Get-ChildItem $backupPath -Filter "*.bacpac" |
+Where-Object {
+$_.CreationTime -lt (Get-Date).AddDays(-30)
+} |
+Remove-Item -Force
