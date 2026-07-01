@@ -1,1 +1,1 @@
-winget install Databricks.DatabricksCLI
+databricks auth login --host https://adb-1234567890123456.7.azuredatabricks.net
