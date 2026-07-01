@@ -1,28 +1,61 @@
-# Create output folder
-$OutputFolder = ".\MyJobs"
-New-Item -ItemType Directory -Force -Path $OutputFolder | Out-Null
-
-# Get logged-in user
-$Me = (databricks current-user me --output json | ConvertFrom-Json).user_name
-
-# Get all jobs
-$Jobs = databricks jobs list --output json | ConvertFrom-Json
-
-foreach ($Job in $Jobs) {
-
-    if ($Job.creator_user_name -eq $Me) {
-
-        $JobId = $Job.job_id
-        $JobName = $Job.settings.name
-
-        # Replace invalid filename characters
-        $SafeName = $JobName -replace '[\\/:*?"<>|]', '_'
-
-        Write-Host "Exporting $SafeName..."
-
-        databricks jobs get $JobId --output json |
-            Out-File "$OutputFolder\$SafeName.json" -Encoding utf8
-    }
-}
-
-Write-Host "Completed! All your jobs have been exported to $OutputFolder"
+dlt_inc_dev_udl_dlh_finance_finsight_cdw_utilisphere_ticket_response_t
+Job
+dlhfinance-dev
+dlt_inc_dev_udl_dlh_finance_finsight_cdw_tsc_metric_life_of_ticket_main_stage
+Job
+dlhfinance-dev
+dlt_inc_dev_udl_dlh_finance_finsight_cdw_agentpresence
+Job
+dlhfinance-dev
+dlt_inc_dev_udl_dlh_finance_finsight_asl_asl_session_segment
+Job
+dlhfinance-dev
+dlt_inc_dev_udl_dlh_finance_finsight_asl_asl_participant_session
+Job
+dlhfinance-dev
+dlt_inc_dev_udl_dlh_finance_finsight_asl_asl_participant
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_wdmplsr_easelsrform
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_salefa_voip
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_salefa_stageoecorionorder
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_noe_stg_netbuild_elecprojectcode
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_erdt_erdtwarmleadopty
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_dwops_stg_ctl_order_details
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_dwops_armor_attributes
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_clarsup_tmp_voice_pricing_discount
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_clarsup_stg_fcam_sites
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_clarsup_stg_clarsup_equipreturndata
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_clarsup_clarsupp_slv_rollup_stage
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_cdw_tbl_v_gfs_field_tech_mapping
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_cdw_serv_dlvry_relationship
+Job
+dlhfinance-dev
+dlt_full_dev_udl_dlh_finance_finsight_cdw_gfs_3tech_billing_staging
+Job
+dlhfinance-dev
+	
