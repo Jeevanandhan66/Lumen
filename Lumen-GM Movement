@@ -1,22 +1,462 @@
-EXEC bira.ListHoursWorked
-@DATE_FROM = ?, 
-@DATE_TO = ?
-WITH RESULT SETS
-	((
-		crew_id int null,
-		crew varchar(200) null,
-		cuid_supv varchar(20) null,
-		cuid_tech varchar(20) null,
-		[date] datetime null,
-		work_week_no int null,
-		work_week_day int null,
-		dow varchar(3) null,
-		hrs_shift decimal(10,3) null,
-		hrs_ot decimal(10,3) null,
-		hrs_off decimal(10,3) null,
-		hrs_worked decimal(10,3) null,
-		hrs_worked_sap decimal(10,3) null,
-		is_holiday tinyint null,
-		is_scheduled tinyint null,
-		updated_ts datetime null
-	))
+USE [NSCHEDULE]
+GO
+/****** Object:  StoredProcedure [bira].[ListHoursWorked]    Script Date: 7/4/2026 9:02:39 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER procedure [bira].[ListHoursWorked]
+( @DATE_FROM smalldatetime = null
+, @DATE_TO smalldatetime = null
+, @SINCE smalldatetime = null
+, @CREW_ID varchar(max) = null
+, @CUID varchar(12) = null
+)
+as 
+begin 
+	set nocount on;
+
+	------ debug 
+	--declare @DATE_FROM smalldatetime = '2019-07-01'
+	--, @DATE_TO smalldatetime = '2019-07-12'
+	--, @SINCE smalldatetime = null -- '2019-07-01'
+	--, @CREW_ID varchar(max) = null
+	--, @CUID varchar(12) = null --'LAANDE1'
+	--;
+	------ /debug 
+
+	declare @proc varchar(max) = 'BIRA.'+isnull(upper(object_name(@@procid)),'TEST');
+	
+	declare @dt varchar(24) = '';
+	declare @rc int; 
+
+	declare @log varchar(max);
+	set @log = 'DATE_FROM='+isnull(convert(varchar(10),@DATE_FROM,121),'')+',DATE_TO='+isnull(convert(varchar(10),@DATE_TO,121),'')+',SINCE='+isnull(convert(varchar(24),@SINCE,121),'')+',CREW_ID='+isnull(@CREW_ID,'')+',CUID='+isnull(@CUID,'');
+	
+	set @DATE_FROM = isnull(@DATE_FROM,getdate());
+	set @DATE_TO = isnull(@DATE_TO, @DATE_FROM);
+
+	if( @DATE_FROM > @DATE_TO ) begin 
+		declare @tmp smalldatetime = @DATE_FROM;
+		set @DATE_FROM  = @DATE_TO;
+		set @DATE_TO = @tmp;
+	end;
+	
+	set @SINCE = (case when isnull(@SINCE,'')='' then null else @SINCE end);
+	set @CREW_ID = (case when isnull(@CREW_ID,'')='' then null else @CREW_ID end);
+	set @CUID = (case when isnull(@SINCE,'')='' then null else @CUID end);
+	
+begin try 
+	declare @crewId int = 0;
+	declare @curr int, @max int;
+
+	declare @crews table (NDX int identity(1,1), CREW_ID int, CREW_NAME varchar(max), MGR_CUID varchar(max), SUPV_CUID varchar(max), SUPV_NAME varchar(max));
+	if( @CREW_ID is not null ) begin 
+		insert into @crews (CREW_ID, CREW_NAME, MGR_CUID, SUPV_CUID, SUPV_NAME)
+			select C.CREW_ID, C.CREW_NAME, upper(E.Manager) MGR_CUID, upper(E.CUID) SUPV_CUID, E.PreferredName+' '+E.LastName SUPV_NAME
+				from dbo.CrewSupervisors C
+				inner join dbo.EMPLOYEE E on E.Status='Active' and E.CUID=C.CUID
+				where C.ROLE='SUPV'
+				and @CREW_ID in (cast(C.CREW_ID as varchar(10)), C.CREW_NAME)
+				order by CREW_NAME
+		;
+		set @max = @@rowcount;
+		if( @max = 0 ) begin 
+			insert into @crews (CREW_ID, CREW_NAME, MGR_CUID, SUPV_CUID, SUPV_NAME)
+				select C.CREW_ID, C.CREW_NAME, upper(E.Manager) MGR_CUID, upper(E.CUID) SUPV_CUID, E.PreferredName+' '+E.LastName SUPV_NAME
+					from dbo.CrewSupervisors C
+					inner join dbo.EMPLOYEE E on E.Status='Active' and E.CUID=C.CUID
+					where C.ROLE='SUPV'
+					and C.CREW_NAME like @CREW_ID+'%'
+					order by CREW_NAME
+			;
+			set @max = @@rowcount;
+			if( @max = 0 ) begin 
+				raiserror('CREW "%s" NOT FOUND; PLEASE CHECK THAT YOU HAVE THE CORRECT CREW NAME OR NUMBER', 11, 0, @CREW_ID);
+			end;
+		end; 
+	end 
+	else begin 
+		--insert into @crews (CREW_ID, CREW_NAME, MGR_CUID, SUPV_CUID, SUPV_NAME)
+			--exec bira.ListCrews
+		;
+		insert into @crews (CREW_ID, CREW_NAME, MGR_CUID, SUPV_CUID, SUPV_NAME)
+			select C.CREW_ID, C.CREW_NAME, upper(E.Manager) MGR_CUID, upper(E.CUID) SUPV_CUID, E.PreferredName+' '+E.LastName SUPV_NAME
+				from dbo.CrewSupervisors C
+				inner join dbo.EMPLOYEE E on E.Status='Active' and E.CUID=C.CUID
+				where C.ROLE='SUPV'
+				order by CREW_NAME
+		;
+		set @max = @@rowcount;
+		if( @max = 0 ) begin 
+			raiserror('COULD NOT FIND ANY CREWS IN LIST; PLEASE CONTACT NSCHEDULE ADMIN', 11, 0, @CREW_ID);
+		end; 
+	end;
+
+	if( len(@CREW_ID) > 0 and isnumeric(@CREW_ID)=1 and @CREW_ID > 0 ) begin 
+		delete from @crews where CREW_ID != @CREW_ID;
+		set @max = (select top 1 NDX from @crews order by NDX desc);
+		-- dbg select @CREW_ID CREWID, * from @crews;
+	end; 
+	
+	if( isnull(@CUID,'') != '' ) begin 
+		delete from @crews 
+			where CREW_ID not in (select CREW_ID from dbo.TECH_ASSIGNMENT 
+								  where CUID=@CUID 
+								  and START_DATE<=@DATE_FROM 
+								  and @DATE_TO<=isnull(END_DATE,@DATE_TO)
+								  )
+		;
+		set @max = (select top 1 NDX from @crews order by NDX desc);
+		--dbg select @CUID CUID, * from @crews;
+	end; 
+
+	declare @techs table (NDX int identity(1,1), CREW_ID int, DATE smalldatetime, CUID varchar(30), IS_OFF varchar(30), HRS decimal(8,3), TOUR_TS smalldatetime, SCHED_TS smalldatetime);
+	declare @offShifting table (CUID varchar(10), DATE smalldatetime, HRS decimal(6,3), UPDATED_TS smalldatetime);
+	declare @sched table (CUID varchar(10), DATE smalldatetime, HRS decimal(8,3), CAT varchar(30), UPDATED_TS smalldatetime);
+	declare @range table (NDX int
+						 , CREW_ID int, CUID varchar(12)
+						 , DATE smalldatetime
+						 , WW_ID int
+						 , WW_NO int
+						 , WW_DAY int
+						 , DOW varchar(3)
+						 , SHIFT_ID int
+						 , HRS_SHIFT decimal(8,3)
+						 , HRS_OT decimal(8,3)
+						 , HRS_OFF decimal(8,3)
+						 , HRS_WORKED decimal(8,3)
+						 , IS_HOLIDAY int
+						 , IS_SCHEDULED int
+						 , UPDATED_TS smalldatetime
+						 );
+
+	raiserror('# %s: techs %d = %d', 0, 0, @proc, @crewId, @@rowcount) with nowait;
+	declare @report table 
+			( LINE int identity(1,1), NDX int, CREW_ID int, CREW varchar(max)
+			, CUID_SUPV varchar(12), CUID_TECH varchar(12)
+			, DATE smalldatetime
+			, WORK_WEEK_NO int, WORK_WEEK_DAY int, DOW varchar(3)
+			, SHIFT_ID int
+			, HRS_SHIFT decimal(8,3), HRS_OT decimal(8,3), HRS_OFF decimal(8,3), HRS_WORKED decimal(8,3)
+			, IS_HOLIDAY int
+			, IS_SCHEDULED int
+			, HRS_WORKED_SAP decimal(8,3)
+			, UPDATED_TS smalldatetime
+			)
+	;
+
+	set @curr = 1;
+	while( @curr <= @max ) begin 
+		delete from @offshifting;
+		delete from @sched;
+		delete from @range;
+
+		delete from @techs;
+		raiserror('# %s: old crewId=%d - cleared tech list (%d/%d)', 0, 0, @proc, @crewId, @curr, @max) with nowait;
+		
+		set @crewId = (select top 1 CREW_ID from @crews where NDX=@curr);
+		if( @crewId is null ) begin 
+			goto GET_NEXT;
+		end; 
+		insert into @techs (DATE, CREW_ID, CUID, IS_OFF)
+			select distinct C.DATE, A.CREW_ID, upper(A.CUID), null
+			from dbo.GetTechAssignments() A, CALENDAR C, dbo.TECH_DETAIL TD
+			where CREW_ID=@crewId
+			and START_DATE<=@date_from and @date_to <= isnull(END_DATE, @date_to)
+			and C.DATE between @date_from and @date_to
+			and A.CUID=isnull(@CUID,A.CUID)
+			and A.CUID=TD.CUID 
+			and TD.IS_ACTIVE=1
+			order by DATE
+		;
+		
+		if( not(exists(select top 1 1 from @techs)) ) begin 
+			raiserror('# %s: crewId=%d - no techs found in crew (cuid=%s); (%d/%d)', 0, 0, @proc, @crewId, @CUID, @curr, @max) with nowait;
+		--	select distinct 'check '+cast(@crewID as varchar(10))+' '+@CUID msg, C.DATE, A.CREW_ID, upper(A.CUID), null
+		--	from dbo.GetTechAssignments() A, CALENDAR C
+		--	where CREW_ID=@crewId
+		--	and START_DATE<=@date_from and @date_to <= isnull(END_DATE, @date_to)
+		--	and C.DATE between @date_from and @date_to
+		--	and A.CUID=isnull(@CUID,A.CUID)
+		--	order by DATE
+		--;
+			goto GET_NEXT;
+		end; 
+		raiserror('# %s: crewId=%d - loaded %d techs (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		
+
+		update T set TOUR_TS=isnull((select max(TA.UPDATED_TS)
+										from dbo.TECH_ASSIGNMENT TA
+										where TA.CUID=T.CUID
+										and TA.START_DATE <= @DATE_FROM 
+										and @DATE_TO <= isnull(TA.END_DATE, @DATE_TO)
+										), '1901-01-01 00:00:00')
+				from @techs T
+		;
+		
+		update T set SCHED_TS=isnull((select max(S.UPDATED_TS) 
+										from dbo.SCHEDULE S 
+										where S.CUID=T.CUID 
+										and S.DATE between @DATE_FROM and @DATE_TO
+									), T.TOUR_TS)
+				from @techs T
+		;
+		if( @SINCE is not null ) begin 
+			set @dt = convert(varchar(24), @SINCE, 121);
+			delete from @techs where TOUR_TS < @SINCE and SCHED_TS < @SINCE;
+			raiserror('# %s: crewId=%d - removed techs with no changes since %s; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @dt, @@rowcount, @curr, @max) with nowait;
+		end; 
+		if( not(exists(select * from @techs)) ) begin 
+			raiserror('# %s: crewId=%d - tech list empty; (%d/%d)', 0, 0, @proc, @crewId, @curr, @max) with nowait;
+			goto GET_NEXT;
+		end; 
+
+		insert into @range (NDX, CREW_ID, CUID, DATE
+							, WW_ID, WW_NO, WW_DAY, DOW
+							, SHIFT_ID  
+							, HRS_SHIFT, HRS_OT, HRS_OFF, HRS_WORKED
+							, IS_HOLIDAY, IS_SCHEDULED
+							)
+			select NDX
+			 , CREW_ID, CUID
+			 , DATE
+			 , WORK_WEEK_ID, WORK_WEEK_NO, DAY_NO, DOW
+			 , SHIFT_ID
+			 , SHIFT_DURATION -- HRS_SHIFT
+			 , 0.0 -- HRS_OT
+			 , 0.0 -- HRS_OFF
+			 , 0.0 -- HRS_WORKED
+			 
+			 , IS_HOLIDAY
+			 , IS_SCHEDULED
+			from dbo.GetWorkWeekScheduleRangeForCrew(@crewId,@DATE_FROM, @DATE_TO, @CUID)
+		;
+		raiserror('# %s: crewId=%d - loaded %d work weeks entries (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+
+		insert into @offShifting 
+			select distinct upper(S.CUID), S.DATE
+				, sum(SO.DURATION) 
+				, max(S.UPDATED_TS)
+			from @techs TA
+			inner join dbo.CREW C on C.ID=TA.CREW_ID 
+			inner join dbo.SCHEDULE S on S.CUID=TA.CUID and S.DATE between @DATE_FROM and @DATE_TO
+			inner join dbo.CrewShiftOptions SO on SO.CREW_ID=TA.CREW_ID and SO.NAME=S.SUBTYPE
+			where S.DATE=TA.DATE
+			and S.APPROVED_TS is not null --CHECKHERE
+			and S.DELETED_TS is null
+			and S.DURATION_HRS is not null
+			and S.TYPE='SHIFT'
+			and S.SUBTYPE like 'OS-%' -- off shifting...
+			group by S.CUID, S.DATE
+		;
+		raiserror('# %s: crewId=%d - loaded %d off-shifting entries (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		if( @@rowcount > 0 ) begin
+			if( @SINCE is not null ) begin
+				delete from @offShifting where UPDATED_TS < @SINCE;
+				set @dt = convert(varchar(24), @SINCE, 121);
+				raiserror('# %s: crewId=%d - removed off-shifting entries updated before %s: recs=%d (%d/%d)', 0, 0, @proc, @crewId, @dt, @@rowcount, @curr, @max) with nowait;
+			end; 
+
+			update R set HRS_SHIFT=OS.HRS
+				from @range R
+				inner join @offShifting OS on OS.CUID=R.CUID and OS.DATE=R.DATE
+				where OS.HRS > 0.0
+			;
+			raiserror('# %s: crewId=%d - adjusted work week shift entries due to off-shifting; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		end; 
+
+		insert into @sched 
+			select distinct upper(S.CUID), S.DATE
+				, sum(S.DURATION_HRS) 
+				, (case when S.TYPE='OFF' then 'OFF' 
+						when S.TYPE='SHIFT' then 'WORK'
+						when S.SUBTYPE in ('OTI','OTV','OTM') then 'OT'
+						else S.SUBTYPE
+						end
+				  )
+				, max(S.UPDATED_TS)
+			from @techs TA
+			inner join dbo.CREW C on C.ID=TA.CREW_ID 
+			inner join dbo.SCHEDULE S on S.CUID=TA.CUID and S.DATE between @DATE_FROM and @DATE_TO
+			where S.DATE=TA.DATE
+			and S.APPROVED_TS is not null --CHECKHERE
+			and S.DELETED_TS is null
+			and S.DURATION_HRS is not null
+			and S.SUBTYPE not like 'OS-%' -- off shifting...
+			group by S.CUID, S.DATE
+			, (case when S.TYPE='OFF' then 'OFF' 
+						when S.TYPE='SHIFT' then 'WORK'
+						when S.SUBTYPE in ('OTI','OTV','OTM') then 'OT'
+						else S.SUBTYPE
+						end
+				  )
+		;
+		raiserror('# %s: crewId=%d - loaded schedule exceptions; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		
+		if( @SINCE is not null ) begin 
+			set @dt = convert(varchar(24), @SINCE, 121);
+			delete from @sched where UPDATED_TS < @SINCE;
+			raiserror('# %s: crewId=%d - removed schedule exceptions updated before %s; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @dt, @@rowcount, @curr, @max) with nowait;
+		end; 
+
+		update R set HRS_SHIFT=0.0
+			from @range R
+			where IS_SCHEDULED=0
+		;
+		raiserror('# %s: crewId=%d - updated NS days; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		update R set HRS_WORKED=HRS_SHIFT
+			from @range R
+			where IS_SCHEDULED=1
+		;
+		raiserror('# %s: crewId=%d - updated SCHEDULED days; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		update R set HRS_OFF=HRS_SHIFT, HRS_WORKED=0.0
+			from @range R
+			where IS_HOLIDAY=1
+		;
+		raiserror('# %s: crewId=%d - updated HOLIDAYS days; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		update R set HRS_OFF=S.HRS, HRS_WORKED=HRS_SHIFT-S.HRS, UPDATED_TS=S.UPDATED_TS
+			from @range R 
+			inner join @sched S on S.CUID=R.CUID and S.DATE=R.DATE
+			where S.CAT='OFF'
+			and R.IS_SCHEDULED=1
+		;
+		raiserror('# %s: crewId=%d - updated OFF days; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+		update R set HRS_WORKED=S.HRS-R.HRS_OFF, UPDATED_TS=S.UPDATED_TS
+			from @range R 
+			inner join @sched S on S.CUID=R.CUID and S.DATE=R.DATE
+			where S.CAT='WORK'
+		;
+		raiserror('# %s: crewId=%d - updated WORK days; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+
+		update R set HRS_OT=S.HRS, HRS_WORKED=HRS_SHIFT+S.HRS -- overtime
+					, UPDATED_TS=S.UPDATED_TS
+			from @range R 
+			inner join @sched S on S.CUID=R.CUID and S.DATE=R.DATE
+			where S.CAT='OT'
+		;
+		raiserror('# %s: crewId=%d - updated OT days; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+
+		update R set UPDATED_TS=T.TOUR_TS
+			from @range R
+			inner join @techs T on T.CUID=R.CUID
+			where R.UPDATED_TS is null
+		;
+		
+		insert into @report (NDX, CREW_ID, CREW, CUID_SUPV, CUID_TECH, DATE
+							, WORK_WEEK_NO, WORK_WEEK_DAY, DOW
+							, HRS_SHIFT, HRS_OT, HRS_OFF, HRS_WORKED
+							, IS_HOLIDAY, IS_SCHEDULED
+							, UPDATED_TS
+							)
+			
+			select R.NDX, R.CREW_ID, C.NAME CREW
+			, upper(E.Manager) CUID_SUPV
+			, upper(R.CUID) CUID_TECH
+			, R.DATE
+			, R.WW_NO WORK_WEEK_NO
+			, R.WW_DAY WORK_WEEK_DAY
+			, R.DOW
+			, R.HRS_SHIFT
+			, R.HRS_OT
+			, R.HRS_OFF
+			, R.HRS_WORKED
+			, R.IS_HOLIDAY
+			, R.IS_SCHEDULED
+			, R.UPDATED_TS
+			from @range R
+			inner join dbo.CREW C on C.ID=R.CREW_ID
+			inner join dbo.EMPLOYEE E on E.Status='Active' and E.CUID=R.CUID
+
+		;
+		raiserror('# %s: crewId=%d - created final report; recs=%d (%d/%d)', 0, 0, @proc, @crewId, @@rowcount, @curr, @max) with nowait;
+GET_NEXT:
+		set @curr = @curr+1;
+	end; 
+
+	
+	declare @inclSapHours int = dbo.GetAppConfig('BIRA','INCLUDE_SAP_HOURS','0');
+	if( @inclSapHours = 1 ) begin 
+		declare @sess uniqueidentifier = newid();
+		declare @supv varchar(12);
+		--declare @team table (NDX int identity(1,1), TITLE varchar(max), SUPV varchar(12), CUID varchar(12));
+		declare @team table (NDX int identity(1,1), TITLE varchar(max), SUPV varchar(12));
+		insert into @team 
+			select distinct TITLE, CUID_SUPV 
+			from @report R
+			inner join dbo.EMPLOYEE E on E.Status='Active' and E.CUID=R.CUID_SUPV
+			where E.Title like '%MGR%' or E.Title like '%SUPV%'
+		;
+		set @max = @@rowcount;
+		set @curr = 1;
+		while( @curr <= @max ) begin
+			select top 1 @supv=SUPV from @team where NDX=@curr;
+			raiserror('# %s: pulling SAP records for %s direct reports...', 0, 0, @proc, @supv) with nowait;
+			exec SAP.dbo.SyncTimeCardsEx @supv, null, @DATE_FROM, @DATE_TO, @sess;
+			set @curr = @curr+1;
+		end; 
+
+		; with time_cards (CUID, DATE, HRS_WORKED)
+		as
+		(
+			select CUID, DATE, sum(HOURS_WORKED) HRS_WORKED
+				from SAP.dbo.TIME_CARD TC
+				inner join @report R on R.CUID_SUPV=TC.CUID_SUPV and R.CUID_TECH=TC.CUID and R.DATE=TC.WORK_DATE
+				where TC.SESS=@sess
+				and HRS_WORKED is not null
+				group by CUID, DATE
+	
+		)
+		update R set HRS_WORKED_SAP=TC.HRS_WORKED
+				from @report R
+				inner join time_cards TC on TC.DATE=R.DATE and TC.CUID=R.CUID_TECH
+		;
+		raiserror('# %s: setting HRS_WORKED_SAP: %d records', 0, 0, @proc, @@rowcount) with nowait;
+
+		update @report set HRS_WORKED_SAP=0.0 where HRS_WORKED_SAP is null;
+
+		delete from SAP.dbo.TIME_CARD where SESS=@sess;
+	end;
+end try
+begin catch 
+	set @log = @log + '; '+error_message();
+	select error_number() EC, error_message() MSG, error_line() LINE_NO;
+	exec dbo.UpdateAppLogSimple 'BIRA', @proc, @log, 0, 0;
+	return;
+end catch;
+
+	if( @SINCE is not null ) begin 
+		delete from @report where UPDATED_TS < @SINCE;
+	end;
+
+	delete from @report where CUID_TECH like 'XB%';
+
+	if( @SINCE is not null ) begin 
+		select CREW_ID, CREW,CUID_SUPV, CUID_TECH, DATE
+			, WORK_WEEK_NO, WORK_WEEK_DAY, DOW	
+			, HRS_SHIFT, HRS_OT, HRS_OFF, HRS_WORKED
+			, HRS_WORKED_SAP
+			, IS_HOLIDAY, IS_SCHEDULED
+			, UPDATED_TS
+			from @report 
+			where UPDATED_TS is not null
+			order by LINE asc
+		;
+		set @max = @@rowcount;
+	end
+	else begin 
+		select CREW_ID, CREW,CUID_SUPV, CUID_TECH, DATE
+			, WORK_WEEK_NO, WORK_WEEK_DAY, DOW	
+			, HRS_SHIFT, HRS_OT, HRS_OFF, HRS_WORKED
+			, HRS_WORKED_SAP
+			, IS_HOLIDAY, IS_SCHEDULED
+			, null UPDATED_TS
+			from @report 
+			order by LINE asc
+		;
+		set @max = @@rowcount;
+	end;
+	
+	set @log = @log + ' (FINISHED)'
+	exec dbo.UpdateAppLogSimple 'BIRA', @proc, @log, 0, @max;	
+end;
