@@ -1,4 +1,5 @@
-select count(*) from (WITH COMPANY
+;
+WITH COMPANY
 AS
 (
 	SELECT	 ROW_NUMBER() OVER( PARTITION BY a.CompanyId ORDER BY b.UpdateDate DESC) ROW_ID
@@ -8,8 +9,9 @@ AS
 	              
 	FROM	dbo.Company a with (nolock)                         
 				LEFT OUTER JOIN dbo.CustomerList b with (nolock)
-					ON a.LEXMAccountNumber = b.LEXMAccountNumber
+					ON a.LEXMAccountNumber = b.LEXMAccountNumber 
 )
+
 ,OFFNET
 AS
 (
@@ -27,18 +29,24 @@ AS
 			--,eli.CatalogProductId
 			--,cmse.CatalogProductCategoryId
 			--,cpc.Description as CatalogProductCategory_Description
+
+
 	FROM	dbo.OrderQuote oq with (nolock)
 				INNER JOIN dbo.EntityLineItem eli with (nolock)
 					ON oq.OrderQuoteId = eli.OrderQuoteId
 					AND eli.IsActive = 1
+
 				INNER JOIN dbo.CatalogMarketedServiceElement cmse with (nolock)
 					ON eli.CatalogMarketedServiceElementId = cmse.CatalogMarketedServiceElementId
+
 				INNER JOIN dbo.CatalogProductCategory cpc with (nolock)
 					ON cmse.CatalogProductId = cpc.CatalogProductId
 					AND cmse.CatalogProductCategoryId = cpc.CatalogProductCategoryId
 					AND cpc.Description = 'Off-net Local Loop'
+
 	WHERE	( YEAR( oq.CreateDate) >= YEAR( GETDATE() ) -2 OR YEAR( oq.UpdateDate) >= YEAR( GETDATE() ) -2 )
 )
+
 ,DEALS
 AS
 (
@@ -46,8 +54,10 @@ AS
 			,count( PriceDealId) over (partition by OrderQuoteId) as deal_ct
 			,OrderQuoteId
 			--,PriceDealId, Description, CurrentStatus, Mrc, Nrc, WorkflowInstanceId, CreateDate
+
 	FROM	dbo.PriceDeal with (nolock)
 )
+
 ,PRODUCTS
 AS
 (
@@ -63,15 +73,21 @@ AS
 			,pt.Description as Product_Type
 			
 			,l.Premise + ' ' +  l.Street + ' ' + l.City + ', ' + ' ' + l.State + ' ' + l.CountryCode + ' ' + l.PostalCode as Address
+
 			,price.MRC
 			,price.NRC
+
+
 	from	dbo.EntityProductItem i with (nolock)
 				left outer join dbo.CatalogProduct cp with (nolock)
 					on i.CatalogProductId = cp.CatalogProductId
+
 				left outer join dbo.ProductType pt with (nolock)
 					on i.ProductTypeId = pt.ProductTypeId
+
 				left outer join dbo.Location l with (nolock)
 					on i.LocationId = l.LocationId
+
 				left outer join (
 									select	 EntityProductItemId
 											,PriceTermId
@@ -81,42 +97,57 @@ AS
 									from	dbo.EntityLineItem e with (nolock)
 												left outer join dbo.EntityLineItemPrice p with (nolock)
 													on e.EntityLineItemId = p.EntityLineItemId
+
 									where	e.IsActive = 1
 									group by EntityProductItemId, PriceTermId
+
 								) price
+
 					on i.EntityProductItemId = price.EntityProductItemId
 					--and i.RequestedPriceTermId = price.PriceTermId
 					and price.PriceTermId = 3
+
 	where	i.isactive = 1
 )
+
 SELECT	 oq.*
+
 		,prod.EntityProductItemId as first_EntityProductItemID
 		,prod.Description as first_product
 		,prod.Product_Type as first_product_type
 		
-		,RTRIM( REPLACE( REPLACE( REPLACE( prod.Address, CHAR(9), ' '), CHAR(10), ' '), CHAR(13), ' ')) as first_prod_addr	
+		,RTRIM( REPLACE( REPLACE( REPLACE( prod.Address, CHAR(9), ' '), CHAR(10), ' '), CHAR(13), ' ')) as first_prod_addr	 
+
 		,prod.entity_product_MRC as Quote_TotalMRC
 		,prod.entity_product_NRC as Quote_TotalNRC
 		,ISNULL( prod.entity_product_ct,0) as quote_product_ct
 		,ISNULL( d.deal_ct,0) as deal_ct
+
 		,c.LEXMAccountNumber, c.CompanyName, c.AccountNumber, c.Source, ISNULL( o.row_id, 0) as offnet_ind
 		
 		,CASE	WHEN oq.OrderQuoteId IN ( SELECT DISTINCT EntityId FROM dbo.EntityActivityLog WHERE EntityTypeId = 'ORDER' )THEN 1
 				WHEN oq.OrderQuoteId IN ( SELECT DISTINCT EntityID FROM dbo.WorkflowInstanceActivityLog WHERE EntityTypeId = 'ORDER' ) THEN 1
 				ELSE 0
 		 END as OM_active_flag
+
+
+
+
 FROM	dbo.OrderQuote oq with (nolock)
-			left outer join PRODUCTS prod
+			left outer join PRODUCTS prod 
 				on oq.OrderQuoteId = prod.EntityId
 				and prod.row_id = 1
+
 			left outer join COMPANY c
 				ON oq.CompanyId = c.CompanyId
 				AND c.ROW_ID = 1
+
 			left outer join OFFNET o
 				ON oq.TrackingNumber = o.IFO_OrderNumber
 				AND o.row_id = 1
+
 			left outer join DEALS d
 				ON oq.OrderQuoteId = d.OrderQuoteId
 				and d.row_id = 1
 				
-WHERE	 YEAR( oq.CreateDate) >= YEAR( GETDATE() ) -1 OR YEAR( oq.UpdateDate) >= YEAR( GETDATE() ) -1) a
+WHERE	 YEAR( oq.CreateDate) >= YEAR( GETDATE() ) -2 OR YEAR( oq.UpdateDate) >= YEAR( GETDATE() ) -2
