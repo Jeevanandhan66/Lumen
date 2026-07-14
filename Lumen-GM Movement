@@ -1,4 +1,7 @@
-dev_udl_dlh_finance.finsight.dim_galcapture
-dev_udl_dlh_finance.finsight.dim_utilisphere_ticket_response_t
+Print cell based full Databricks spark SQL notebook and use these tables instead
 
+dev_udl_dlh_finance.finsight.dim_utilisphere_ticket_response_t
+dev_udl_dlh_finance.finsight.dim_galcapture
 dev_udl_dlh_finance.finsight.dim_LDR_UTILISPHERE_TICKET_GREEN_OTC_T
+
+use v_tmp prefix for views
