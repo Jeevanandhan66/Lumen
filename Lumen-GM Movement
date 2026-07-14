@@ -1,17 +1,575 @@
-draft a mail to my manager that currently we are migrating sources in legacy servers (Oracle, SQL Server) from SSIS packages to databricks as client said more that 50% of the source tables already exists in their other databricks catalog we need reader previleges to those catalogs and tables, and few column were missing in those tables we need confirmation to proceed with the available columns and ask client in what manner we need to process the tables that already exists in catalog
+USE [SA_Staging]
+GO
+/****** Object:  StoredProcedure [dbo].[usp_Locates_Display_Screener]    Script Date: 7/13/2026 3:28:39 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
 
-Access required for Existing catalogs:
 
-USE SCHEMA
-USE CATALOG
+
+
+
+
+
+
+
+
+
+
+
+
+/******************************************************************************************************************************************************************************
+ Author:		Subhrajit Rout
+ Create date:	2025-01-04
+ Description:	Prepares table load for Locates and screeners report
+ 
+ Ver		Date			Author			    Desc
+ -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 1.0		2025-01-04		Subhrajit Rout  	Initial deployment to production from Dev(USIDCVSQL1004)
+ 1.1        2025-04-26      Subhrajit Rout      Used UTILISPHERE_TICKET_RESPONSE_T table instead of UTILISPHERE_TICKET_RESPONSE_ALL_T and removed hardcode value for supervisors to pull from GALCapture
+ 1.2        2025-05-25      Subhrajit Rout      Optimized the proc by using temp table loads, enhanced SQL queries
+ 1.3        2025-10-12      Subhrajit Rout      Added OPERATOR field to the LDR_UTILISPHERE_TICKET_GREEN_OTC_T table from UtiliSphere ticket table
+ ******************************************************************************************************************************************************************************/
+
+ALTER PROCEDURE [dbo].[usp_Locates_Display_Screener]
+
+AS
+BEGIN
+
+---- creation of LDR_UTILISPHERE_TICKET_GREEN_OTC_T table
+
+IF OBJECT_ID('tempdb..#TempLocator1') IS NOT NULL
+BEGIN
+    DROP TABLE #TempLocator1;
+END
+
+
+
+ SELECT DISTINCT 
+        tir_dbl.TICKET_ID,
+        tir_dbl.RESPONSE_NAME AS Response_Code,
+        tir_dbl.LOCATE_DATETIME AS LastRes_Date,
+        COALESCE(
+            RTRIM(tir_dbl.LOCATOR_NAME),
+            CASE 
+                WHEN (tir_dbl.LOCATOR_FIRST_NAME = '' OR tir_dbl.LOCATOR_FIRST_NAME IS NULL) 
+                    AND (tir_dbl.LOCATOR_LAST_NAME = '' OR tir_dbl.LOCATOR_LAST_NAME IS NULL) 
+                THEN NULL
+                ELSE RTRIM(CONCAT(tir_dbl.LOCATOR_FIRST_NAME, ' ', tir_dbl.LOCATOR_LAST_NAME))
+            END,
+            RTRIM(CONCAT(tir_dbl.OPERATOR_FIRST_NAME, ' ', tir_dbl.OPERATOR_LAST_NAME))
+        ) AS Lr_Locator_Name,
+        tir_dbl.RESPONSE_CONTRACTOR AS Lr_Response_Contractor,
+        tir_dbl.CREATEDBY_EMAIL,
+        tir_dbl.LOCATOR_LAST_NAME,
+        tir_dbl.CREATE_DATETIME
+		into #TempLocator1
+    FROM dbo.UTILISPHERE_TICKET_RESPONSE_T TIR_DBL
+    INNER JOIN (
+        SELECT TICKET_ID, MAX(TICKET_RESPONSE_ID) AS TICKET_RESPONSE_ID
+        FROM dbo.UTILISPHERE_TICKET_RESPONSE_T
+        GROUP BY TICKET_ID
+    ) max_resp ON max_resp.TICKET_ID = TIR_DBL.TICKET_ID AND max_resp.TICKET_RESPONSE_ID = TIR_DBL.TICKET_RESPONSE_ID
+	 WHERE tir_dbl.CLOSED = 'Yes'	;
+
+
+IF OBJECT_ID('tempdb..#GAL') IS NOT NULL
+BEGIN
+    DROP TABLE #GAL;
+END
+
+
+
+SELECT DISTINCT 
+        REPLACE(emp.CUID, '.', '') AS Employee_Cuid,
+		emp.full_name as Employee_Name,
+        CASE 
+                WHEN CHARINDEX('@', emp.EMAIL_ADDRESS) > 0 THEN SUBSTRING(UPPER(SUBSTRING(emp.EMAIL_ADDRESS, 1, CHARINDEX('@', emp.EMAIL_ADDRESS) - 1)), 1, LEN(UPPER(SUBSTRING(emp.EMAIL_ADDRESS, 1, CHARINDEX('@', emp.EMAIL_ADDRESS) - 1))))
+            END AS FullDotName,
+		emp.EMAIL_ADDRESS,
+		emp.JOB_TITLE,
+        REPLACE(sup.CUID, '.', '') AS Management_Cuid,
+		sup.full_name as Management_Name
+		into #GAL
+    FROM dbo.GALCapture emp
+    INNER JOIN dbo.GALCapture sup ON EMP.SUPERVISOR_EMPLOYEE_NUMBER = SUP.EMPLOYEE_NUMBER
+    WHERE emp.CUID <> ' '
+	and emp.EMAIL_ADDRESS is not null
+	AND UPPER(emp.CUID) NOT LIKE ('XB%')
+            AND UPPER(emp.CUID) NOT LIKE ('XS%')
+            AND emp.JOB_TITLE NOT IN ('CEO', 'CHIEF EXECUTIVE OFFICER', 'CHIEF OPERATING OFFICER', 'PRESIDENT', 'PRESIDENT CEO', 'PRESIDENT/CEO', 'PRESIDENT/OWNER')
+
+
+IF OBJECT_ID('tempdb..#TempLocator') IS NOT NULL
+BEGIN
+    DROP TABLE #TempLocator;
+END
+
+
+select distinct
+cte_tir.TICKET_ID,
+    cte_tir.RESPONSE_CODE,
+    cte_tir.LASTRES_DATE,
+    cte_tir.CREATEDBY_EMAIL,
+    cte_tir.LR_LOCATOR_NAME,
+    cte_tir.LR_RESPONSE_CONTRACTOR,
+    CASE 
+        WHEN coalesce(GAL.Management_Name, GAL1.Management_Name) IS NULL
+            AND UPPER(cte_tir.RESPONSE_CODE) LIKE '%CPM%'
+            OR (LOWER(cte_tir.LR_LOCATOR_NAME) LIKE '%nolan snyder%'
+                OR LOWER(cte_tir.LR_LOCATOR_NAME) LIKE 'cpm automation%')
+        THEN 'NOLAN SNYDER'
+        WHEN coalesce(GAL.Management_Name, GAL1.Management_Name) IS NULL
+            AND (UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%STAKE CENTER%'
+                OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%SCL%'
+                OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%USIC%'
+                OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%LINDERLAKE%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%SUNBELT%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%INTEGRITY LOCATING%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%NORTHERN LIGHTS LOCATING%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%OLAMETER%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%AMC%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%BAYSTATE%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%UTILITIES PLUS%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%SUMMIT%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%1ST CALL%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%DANIEL AMAYA%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%MCAMPBELL%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%MIKE JONES%'
+					OR UPPER(cte_tir.LR_LOCATOR_NAME) LIKE '%BEN WHITAKER%'
+					)
+				THEN 'External Locate Vendor'
+			ELSE UPPER(coalesce(GAL.Management_Name, GAL1.Management_Name))
+			END AS Supervisor
+			into #TempLocator
+from #TempLocator1 cte_tir
+	LEFT JOIN  #GAL GAL
+			ON  LOWER(GAL.EMPLOYEE_CUID) = LOWER(LTRIM(RTRIM(SUBSTRING(cte_tir.LOCATOR_LAST_NAME, CHARINDEX(' ', cte_tir.LOCATOR_LAST_NAME) + 1, LEN(cte_tir.LOCATOR_LAST_NAME) - CHARINDEX(' ', cte_tir.LOCATOR_LAST_NAME)))))
+	LEFT JOIN  #GAL GAL1
+			    on LOWER(GAL1.FULLDOTNAME) = LOWER(SUBSTRING(UPPER(SUBSTRING(cte_tir.CREATEDBY_EMAIL, 1, CHARINDEX('@', cte_tir.CREATEDBY_EMAIL) - 1)), 1, LEN(UPPER(SUBSTRING(cte_tir.CREATEDBY_EMAIL, 1, CHARINDEX('@', cte_tir.CREATEDBY_EMAIL) - 1))) - 1)) 
+		
+IF OBJECT_ID('tempdb..#TempVendor1') IS NOT NULL
+BEGIN
+    DROP TABLE #TempVendor1;
+END
+
+SELECT 
+    ticket_id,
+    Folder AS ServiceArea
+	INTO #TempVendor1
+	FROM (
+
+SELECT 
+    aud.ticket_id,
+    CASE 
+        WHEN aud.SHORT_DESCRIPTION = 'Put in Folder' THEN 
+            CASE 
+                WHEN CHARINDEX('in ', aud.LONG_DESCRIPTION) > 0 
+                    AND CHARINDEX('by ', aud.LONG_DESCRIPTION, CHARINDEX('in ', aud.LONG_DESCRIPTION) + 3) > 0 THEN 
+                    SUBSTRING(
+                        SUBSTRING(aud.LONG_DESCRIPTION, CHARINDEX('in ', aud.LONG_DESCRIPTION) + 3, LEN(aud.LONG_DESCRIPTION)),
+                        1,
+                        CHARINDEX('by ', SUBSTRING(aud.LONG_DESCRIPTION, CHARINDEX('in ', aud.LONG_DESCRIPTION) + 3, LEN(aud.LONG_DESCRIPTION))) - 2
+                    ) 
+                ELSE NULL
+            END
+        ELSE 
+            CASE 
+                WHEN CHARINDEX('to ', aud.LONG_DESCRIPTION) > 0 
+                    AND CHARINDEX('by ', aud.LONG_DESCRIPTION, CHARINDEX('to ', aud.LONG_DESCRIPTION) + 3) > 0 THEN 
+                    SUBSTRING(
+                        SUBSTRING(aud.LONG_DESCRIPTION, CHARINDEX('to ', aud.LONG_DESCRIPTION) + 3, LEN(aud.LONG_DESCRIPTION)),
+                        1,
+                        CHARINDEX('by ', SUBSTRING(aud.LONG_DESCRIPTION, CHARINDEX('to ', aud.LONG_DESCRIPTION) + 3, LEN(aud.LONG_DESCRIPTION))) - 2
+                    ) 
+                ELSE NULL
+            END
+    END AS Folder
+
+FROM dbo.UTILISPHERE_TICKET_AUDIT_T aud
+INNER JOIN (
+    SELECT ticket_id, MAX(TICKET_AUDIT_ID) AS TICKET_AUDIT_ID
+    FROM dbo.UTILISPHERE_TICKET_AUDIT_T
+    WHERE short_description IN ('put in folder', 'moved to folder')
+    GROUP BY ticket_id
+) lastfolder_r ON lastfolder_r.ticket_audit_id = aud.ticket_audit_id AND lastfolder_r.TICKET_ID = AUD.TICKET_ID
+) a
+
+
+IF OBJECT_ID('tempdb..#TempVendor') IS NOT NULL
+BEGIN
+    DROP TABLE #TempVendor;
+END
+
+
+SELECT 
+    ticket_id,
+    ServiceArea,
+    CASE 
+        WHEN ServiceArea = 'BOS07' THEN '1st Call'
+        WHEN ServiceArea = 'BOS01' THEN 'Baystate'
+        WHEN ServiceArea = 'SEA01' THEN 'Utilities Plus'
+        WHEN ServiceArea IN ('DAL01', 'DAL01A', 'DAL01B', 'DAL01C', 'DAL01D', 'DAL01E', 'DAL01F', 'DAL07', 'DAL07A', 'HOU01', 'HOU03', 'HOU04', 'HOU06', 'HOU13', 'HOU14') THEN 'AMC'
+        WHEN ServiceArea IN ('AUS01', 'KC08', 'KC11', 'KC12') THEN 'Integrity Locating'
+        WHEN ServiceArea IN ('CHI06', 'MN10', 'MN12', 'STL03B') THEN 'Linderlake'
+        WHEN ServiceArea IN ('ATL03', 'ATL04', 'ATL05', 'ATL07', 'ATL08', 'ATL09', 'ATL10', 'ATL11', 'AUS09', 'BAL01', 'BOS06', 'BOS10', 
+                        'CAR03A', 'CAR05', 'CHI01', 'CHI02', 'CHI03', 'CHI05', 'CHI07', 'CIN03', 'CIN07', 'CIN08', 'CIN10', 'DENMNS01', 
+                        'DENMNS02', 'DENMNS03', 'DENMNS04', 'DENMNS05', 'DENMNS06', 'DENMNS07', 'DETD01', 'DETD02', 'DETD03', 'DETD04', 
+                        'DETD18', 'DETD20', 'GAMNS01', 'GC04', 'HOU12', 'IL08', 'KC02', 'KC04', 'KC07', 'KC10', 'KC23', 'KC24', 'KC28', 
+                        'LI-CT01', 'LI-CT02', 'LI-CT03', 'LI-NY01', 'LI-NYC01', 'MIA468', 'MIA583', 'MN01', 'MN02', 'MN03', 'MN05', 'MN06', 
+                        'MN07', 'MN08', 'MN09', 'NFL14', 'NJ01', 'NO04', 'NO11', 'NVL01', 'NVL03', 'NVL04', 'NVL06', 'NVL09', 'NVL12', 
+                        'NYC01', 'NYMNS02', 'OH01', 'ORJ10', 'ORJ13', 'ORJ502', 'ORJ584', 'PAMNS01', 'PAMNS03', 'PAMNS05', 'RCH01', 'RCH02', 
+                        'SFL06', 'SLC06', 'SLC07', 'STL05', 'TPO01', 'TPO03', 'TPO04', 'TPO05', 'TPO06', 'TPO08', 'VA04', 'VTMNS01') THEN 'Stake Center Locating'
+        WHEN ServiceArea IN ('POR12') THEN 'USIC'
+        WHEN ServiceArea IN ('CHI04', 'CHI06', 'CIN02', 'IL05', 'IL06', 'IN01', 'IN02', 'IN04', 'MN10', 'MN12', 'STL03b') THEN 'Northern Lights Locating'
+        WHEN ServiceArea IN (
+					'ATL01', 'ATL02', 'ATL06', 'ATL11', 'ATL12', 'ATL14', 'ATL18', 'ATL19', 'ATL20', 'ATL21', 'AUS03', 'AUS04', 'AUS07', 'AUS08', 'AUS11', 'AUS12', 'BAL02', 'BAL03', 'BOS02', 'BOS03', 'BOS04', 'BOS05', 'BOS08', 'BOS09', 'BOS11', 'BOS421', 'CAN01', 'CAN02', 'CAN04', 'CAR01', 'CAR02', 'CAR03', 'CAR05', 'CAR06', 'CAR06A', 'CAR07', 'CAR08', 'CAR09', 'CIN01', 'CIN04', 'CIN05', 'CIN06', 'CIN09', 'CWI02', 'DAL02A', 'DAL03', 'DAL03A', 'DAL05', 'DAL06A', 'DAL08', 'DAL09', 'DEN01b', 'DEN03', 'DEN04', 'DEN05', 'DEN06', 'DEN07', 'DEN08', 'DEN09', 'DEN10', 'DEN11', 'DEN13', 'DENMNS03', 'DENMNS05', 'DETD06', 'DETD07', 'DETD08', 'DETD09', 'DETD15', 'DETD16', 'DETD21', 'ELP01', 'ELP02', 'ELP03', 'ELP04', 'ELP05', 'ELP06', 'ELP07', 'ELP08', 'ELP09', 'ELP10', 'GAMNS02', 'GC01', 'GC02', 'GC03', 'GC05', 'GC06', 'HOU02', 'HOU05', 'HOU07', 'HOU08', 'HOU09', 'HOU11', 'HOU15', 'IL01', 'IL02', 'IL03', 'IL04', 'IL07', 'IN03', 'KC01', 'KC03', 'KC05', 'KC06', 'KC09', 'KC13', 'KC14', 'KC15', 'KC16', 'KC17', 'KC18', 'KC19', 'KC20', 'KC21', 'KC22', 'KC25', 'KC26', 'KC27', 'KC29', 'KC30', 'KC31', 'KSMNS01', 'KYMNS01', 
+					'KYMNS02', 'LAX01', 'LAX01B', 'LAX02', 'LAX03', 'LAX04', 'LVG02', 'MIA01', 'MIA02', 'MIA03', 'MIA04', 'MIA05', 'MIA468', 'MIA583', 'MIA583 Metro', 'MN04', 'MN11', 'NFL01', 'NFL03', 'NFL14', 'NFL15', 'NFL16', 'NIL01', 'NO01', 'NO03', 'NO05', 'NO06', 'NO07', 'NO08', 'NO09', 'NO12', 'NO15', 'NO16', 'NVL02', 'NVL05', 'NVL07', 'NVL08', 'NVL10', 'NVL11', 'NWI01', 'NWI02', 'ORJ09', 'ORJ10', 'ORJ502', 'ORJ584', 'PA03', 'PAMNS02', 'PAMNS04', 'PAMNS06', 'PAMNS07', 'PAMNS08', 'PHO01', 'PHO02', 'PHO03', 'PHO04', 'PHO06', 'POR08', 'POR09', 'POR10', 'POR11', 'POR16', 'POR23', 'RCH03', 'RCH07', 'RCH10', 'SDG01', 'SDG02', 'SDG03', 'SDG04', 'SDG05', 'SDG06', 'SDG07', 'SDGMNS01', 'SEA02', 'SEA03', 'SEA04', 'SEA05', 'SF01', 'SF02', 'SF03', 'SF04', 'SF05', 'SF06', 'SF07', 'SF08', 'SF09', 'SF10', 'SF11', 'SF12', 'SFL06', 'SFL07', 'SJO01', 'SJO02', 'SJO03', 'SJO04', 'SJO05', 'SJO06', 'SJO07', 'SJO08', 'SJO09', 'SJO10', 'SJO11', 'SJO12', 'SJO13', 'SJO14', 'SJO15', 'SJO16', 'SLC01', 'SLC02', 'SLC03', 'SLC04', 'SLC05', 'SLC08', 'SLC09', 'SLC10', 'SLC11', 'STL04', 'STL06', 'STL10', 'STR01', 'STR02', 'STR03', 
+					'STR05', 'SWI01', 'SXF01', 'SXF02', 'SXF03', 'SXF04', 'TNMNS02', 'TPO01', 'TPO03', 'TPO04', 'TPO08', 'Training', 'Unicorn Project 9', 'VA01', 'VA02', 'VA03', 'VA05', 'VA06', 'VA07', 'WDC01', 'WDC02'
+					)
+				THEN 'Internal'
+			ELSE ServiceArea
+			END AS Vendor 
+			into #TempVendor
+	from #TempVendor1
+
+
+IF OBJECT_ID('tempdb..#Response') IS NOT NULL
+BEGIN
+    DROP TABLE #Response;
+END
+
+
 SELECT
+		RESP.ticket_ID
+		,response_name AS response_code
+		,locate_datetime AS FirstRes_Date
+		,COALESCE(RTRIM(LOCATOR_NAME), 
+					CASE 
+                      WHEN (LOCATOR_FIRST_NAME = '' OR LOCATOR_FIRST_NAME IS NULL) AND (LOCATOR_LAST_NAME = '' OR LOCATOR_LAST_NAME IS NULL) THEN NULL
+                      ELSE RTRIM(CONCAT(LOCATOR_FIRST_NAME, ' ', LOCATOR_LAST_NAME))
+					  END, RTRIM(CONCAT(OPERATOR_FIRST_NAME, ' ', OPERATOR_LAST_NAME))) AS FR_Locator_Name
+		,response_contractor AS FR_response_contractor
+		,createdby_email
+	into #Response
+    FROM dbo.UTILISPHERE_TICKET_RESPONSE_T RESP
+	INNER JOIN (
+		SELECT
+			TICKET_ID
+      ,MIN(TICKET_RESPONSE_ID) TICKET_RESPONSE_ID
+    FROM dbo.UTILISPHERE_TICKET_RESPONSE_T RESP
+		GROUP BY TICKET_ID
+		) max_resp
+		ON max_resp.TICKET_ID = RESP.TICKET_ID
+			AND max_resp.TICKET_RESPONSE_ID = RESP.TICKET_RESPONSE_ID
 
-asl
-dev_dsl
-dev_asl
-dev_erl
-erl
-ravoicero-sql-connection_catalog
-ravoicero-sql-connection_catalof
-udl_dlhfpafinance
+
+
+
+IF OBJECT_ID('tempdb..#TempFinaltable1') IS NOT NULL
+BEGIN
+    DROP TABLE #TempFinaltable1;
+END
+			
+
+SELECT 
+    tix.ticket_ID,
+    tix.ticket_number,
+    'Enterprise' AS Network,
+    tix.call_center,
+    tix.ticket_type,
+    tix.place AS City,
+    tix.county AS County,
+    UPPER(tix.STATE) AS STATE,
+    risk_score.risk_score,
+	CASE 
+		WHEN foldertovendor.Vendor IS NULL
+			THEN 'Internal'
+		ELSE foldertovendor.Vendor
+		END AS AssignedContractor,
+    coalesce(FolderToVendor.ServiceArea, tix.ticket_folder) as ServiceArea,
+    FORMAT(tix.received_datetime, 'MM/dd/yyyy HH:mm:ss') AS received_datetime,
+    CASE
+        WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND TIX.RECEIVED_DATETIME > TIX.DUE_DATETIME
+            THEN FORMAT(DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME), 'MM/dd/yyyy HH:mm:ss')
+        WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND DATEDIFF(HOUR, TIX.RECEIVED_DATETIME, TIX.DUE_DATETIME) < 2
+            THEN FORMAT(DATEADD(HOUR, 2, TIX.DUE_DATETIME), 'MM/dd/yyyy HH:mm:ss')
+        WHEN LOWER(TIX.TICKET_TYPE) IN ('rush', 'now', 'damage/exposed') AND TIX.STATE = 'CA'
+            THEN FORMAT(DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME), 'MM/dd/yyyy HH:mm:ss')
+        WHEN LOWER(TIX.TICKET_TYPE) IN ('renew', 'amend')
+            THEN FORMAT(calendar.due_date, 'MM/dd/yyyy') + ' ' + FORMAT(TIX.RECEIVED_DATETIME, 'HH:mm:ss')
+        ELSE FORMAT(TIX.DUE_DATETIME, 'MM/dd/yyyy HH:mm:ss')
+    END AS CalcDueDate,
+    FORMAT(tir_otr.FirstRes_Date, 'MM/dd/yyyy HH:mm:ss') AS FirstRes_Date,
+    FORMAT(tir_otc.LastRes_date, 'MM/dd/yyyy HH:mm:ss') AS LastRes_date,
+    -- received to first response hours
+    ROUND(DATEDIFF(MINUTE, tix.received_datetime, tir_otr.FirstRes_Date) , 2) AS RTR_Minutes,
+    -- received to close hours
+    ROUND(DATEDIFF(MINUTE, tix.received_datetime, tir_otc.LastRes_date) , 2) AS RTC_Minutes,
+    CASE
+        WHEN 
+            CASE
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND TIX.RECEIVED_DATETIME > TIX.DUE_DATETIME
+                    THEN DATEADD(HOUR, 2, tix.received_datetime)
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND DATEDIFF(HOUR, TIX.RECEIVED_DATETIME, TIX.DUE_DATETIME) < 2
+                    THEN DATEADD(HOUR, 2, tix.due_datetime)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('rush', 'now', 'damage/exposed') AND TIX.STATE = 'CA'
+                    THEN DATEADD(HOUR, 2, tix.received_datetime)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('renew', 'amend')
+                    THEN CONVERT(DATETIME, FORMAT(calendar.due_date, 'MM/dd/yyyy') + ' ' + FORMAT(TIX.RECEIVED_DATETIME, 'HH:mm:ss'), 120)
+                ELSE DATEADD(HOUR, 2, tix.due_datetime)
+            END <= DATEADD(HOUR, 2, GETDATE())
+        THEN 'Due'
+        ELSE 'Not_Due'
+    END AS Due_NotDue,
+	TIX.OPERATOR,
+    tir_otr.fr_locator_name AS otr_LocatorName,
+    tir_otc.lr_locator_name AS otc_LocatorName,
+    tir_otc.createdby_email AS otc_locatoremail,
+    tir_otc.supervisor,
+    tir_otc.response_code,
+    CASE
+        WHEN CONVERT(DATETIME, FORMAT(FirstRes_Date, 'MM/dd/yyyy HH:mm:ss'), 120) <=
+            CASE
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND TIX.RECEIVED_DATETIME > TIX.DUE_DATETIME
+                    THEN DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND DATEDIFF(HOUR, TIX.RECEIVED_DATETIME, TIX.DUE_DATETIME) < 2
+                    THEN DATEADD(HOUR, 2, TIX.DUE_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('rush', 'now', 'damage/exposed', 'emer') AND TIX.STATE = 'CA'
+                    THEN DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('renew', 'amend')
+                    THEN CONVERT(DATETIME, FORMAT(calendar.due_date, 'MM/dd/yyyy') + ' ' + FORMAT(TIX.RECEIVED_DATETIME, 'HH:mm:ss'), 120)
+                ELSE CONVERT(DATETIME, FORMAT(TIX.DUE_DATETIME, 'MM/dd/yyyy HH:mm:ss'), 120)
+            END
+        THEN 1
+        ELSE 0
+    END AS OTRFlag,
+    CASE
+        WHEN CONVERT(DATETIME, FORMAT(LastRes_Date, 'MM/dd/yyyy HH:mm:ss'), 120) <=
+            CASE
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND TIX.RECEIVED_DATETIME > TIX.DUE_DATETIME
+                    THEN DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND DATEDIFF(HOUR, TIX.RECEIVED_DATETIME, TIX.DUE_DATETIME) < 2
+                    THEN DATEADD(HOUR, 2, TIX.DUE_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('rush', 'now', 'damage/exposed') AND TIX.STATE = 'CA'
+                    THEN DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('renew', 'amend')
+                    THEN CONVERT(DATETIME, FORMAT(calendar.due_date, 'MM/dd/yyyy') + ' ' + FORMAT(TIX.RECEIVED_DATETIME, 'HH:mm:ss'), 120)
+                ELSE CONVERT(DATETIME, FORMAT(TIX.DUE_DATETIME, 'MM/dd/yyyy HH:mm:ss'), 120)
+            END
+        THEN 1
+        ELSE 0
+    END AS OTCFlag,
+    CASE
+        WHEN tir_otc.LastRes_date IS NULL AND
+            CASE
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND TIX.RECEIVED_DATETIME > TIX.DUE_DATETIME
+                    THEN DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) = 'emergency' AND DATEDIFF(HOUR, TIX.RECEIVED_DATETIME, TIX.DUE_DATETIME) < 2
+                    THEN DATEADD(HOUR, 2, TIX.DUE_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('rush', 'now', 'damage/exposed') AND TIX.STATE = 'CA'
+                    THEN DATEADD(HOUR, 2, TIX.RECEIVED_DATETIME)
+                WHEN LOWER(TIX.TICKET_TYPE) IN ('renew', 'amend')
+                    THEN CONVERT(DATETIME, FORMAT(calendar.due_date, 'MM/dd/yyyy') + ' ' + FORMAT(TIX.RECEIVED_DATETIME, 'HH:mm:ss'), 120)
+                ELSE CONVERT(DATETIME, FORMAT(TIX.DUE_DATETIME, 'MM/dd/yyyy HH:mm:ss'), 120)
+            END < GETDATE()
+        THEN 1
+        ELSE 0
+    END AS WIP_Past_DueFlag,
+    TIX.DUE_DATETIME,
+	TIR_OTR.FR_RESPONSE_CONTRACTOR,
+	TIR_OTC.LR_RESPONSE_CONTRACTOR
+INTO #TempFinaltable1
+FROM dbo.UTILISPHERE_CTL_TICKET_RECENT_T tix
+LEFT JOIN (
+    SELECT c1.date_datetime AS rec_date, c2.date_datetime AS due_date
+    FROM (
+        SELECT 
+            SUM(CASE
+                WHEN is_us_holiday = 1 THEN 0
+                WHEN is_weekend = 1 THEN 0
+                ELSE 1
+            END) OVER (ORDER BY date_datetime) AS cs1,
+            calendar_t.date_datetime
+        FROM SA_Staging.shared_dim.date AS calendar_t
+    ) C1
+    LEFT JOIN (
+        SELECT 
+            ROW_NUMBER() OVER (PARTITION BY cs2 ORDER BY date_datetime) AS rn,
+            calendar_t.cs2,
+            calendar_t.date_datetime
+        FROM (
+            SELECT 
+                SUM(CASE
+                    WHEN is_us_holiday = 1 THEN 0
+                    WHEN is_weekend = 1 THEN 0
+                    ELSE 1
+                END) OVER (ORDER BY date_datetime) AS cs2,
+                calendar_t.date_datetime
+            FROM SA_Staging.shared_dim.date AS calendar_t
+        ) calendar_t
+    ) C2 ON c1.cs1 + 2 = c2.cs2 AND c2.rn = 1
+) calendar ON CAST(tix.received_datetime AS date) = CAST(calendar.rec_date AS date)
+LEFT JOIN (
+    SELECT 
+        TICKET_ID,
+        SUBSTRING(LONG_DESCRIPTION, CHARINDEX('value: ', LONG_DESCRIPTION) + 7, LEN(LONG_DESCRIPTION)) AS Risk_Score
+			FROM dbo.UTILISPHERE_TICKET_AUDIT_T
+	WHERE SUBSTRING(LONG_DESCRIPTION, 0, 28) = 'Ticket Risk Score calculated'
+	) risk_score
+	ON risk_score.ticket_id = tix.ticket_id
+LEFT JOIN #Response tir_otr
+	ON tix.ticket_ID = tir_otr.ticket_ID
+LEFT JOIN #TempLocator tir_otc
+	ON tix.TICKET_ID = tir_otc.TICKET_ID
+LEFT JOIN #TempVendor FolderToVendor
+	ON foldertovendor.ticket_id = tix.ticket_id;
+
+
+IF OBJECT_ID('tempdb..#TempFinaltable') IS NOT NULL
+BEGIN
+    DROP TABLE #TempFinaltable;
+END
+
+
+select *,
+CASE 
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%USIC%' THEN 'USIC'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%ARKUPS%' THEN 'ARKUPS'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%GRAYCLIFF%' THEN 'DirectSAT'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%INTEGRITY%' THEN 'Integrity Locating'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%SUMMIT%' THEN 'Summit'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%UNIBAR%' OR UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%OLAMETER%' THEN 'Olameter'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%SCL%' OR UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%STAKE CENTER%' OR UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%S_N%' THEN 'Stake Center Locating'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%CUS%' THEN 'USIC'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%LINDERLAKE%' THEN 'Linderlake'
+    WHEN UPPER(FR_RESPONSE_CONTRACTOR) LIKE '%SUNBELT%' or LOWER( otr_LocatorName) LIKE '%sunbelt%'
+    OR LOWER(otr_LocatorName) IN (
+        'allen barnes ( stake center )', 'andrew salud ( stake center )', 'arrilies arness biggs ( stake center )', 'fermin thomas stake center', 
+        'benneth anozie ad17537', 'william gilley ad51950', 'derrick spivey ad22163', 'frank crawford ad18620', 'joel harper', 'marc wasem ac11921', 
+        'nathaniel douglas wedlock ( stake center )', 'scott brahaney ad40021', 'gary richardson ad17204', 'jesus s maldonado ( stake center )', 'william gilley ad51950',
+        'arrilies arness biggs ( stake center )', 'terry rothlisberger ad20321', ''
+    ) THEN 'Sunbelt'
+    WHEN LOWER( otc_locatoremail) LIKE '%utilitiesplusllc.com%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%bill kulisek%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%james apker%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%joe sisson%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%amc%'
+			THEN 'AMC'
+		WHEN LOWER( otr_LocatorName) LIKE '%jose perez%'
+			THEN 'AMC'
+		WHEN LOWER( otr_LocatorName) LIKE '%daniel amaya%'
+			THEN 'AMC'
+		WHEN LOWER( otr_LocatorName) LIKE '%cody amby'
+			THEN 'Integrity Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%dan halloran%'
+			THEN '1st Call'
+		WHEN LOWER( otr_LocatorName) LIKE '%ben whitaker%'
+			THEN 'Baystate' 
+		WHEN LOWER( otr_LocatorName) LIKE '%dan burnette%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%donald mattox%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%harold phillips%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%jason overton%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%john siebert%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%ken lafo%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%lionel agosto%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%marc wasem%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%maurice ngalula%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%mendell newman%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%paul werner%'
+			THEN 'Stake Center Locating'
+    WHEN FR_RESPONSE_CONTRACTOR IS NULL AND FirstRes_Date IS NOT NULL THEN 'Internal'
+    ELSE FR_RESPONSE_CONTRACTOR
+END AS FirstResponseCO
+	,CASE 
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%USIC%' THEN 'USIC'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%ARKUPS%' THEN 'ARKUPS'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%GRAYCLIFF%' THEN 'DirectSAT'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%INTEGRITY%' THEN 'Integrity Locating'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%SUMMIT%' THEN 'Summit'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%UNIBAR%' OR UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%OLAMETER%' THEN 'Olameter'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%SCL%' OR UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%STAKE CENTER%' OR UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%S_N%' THEN 'Stake Center Locating'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%CUS%' THEN 'USIC'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%LINDERLAKE%' THEN 'Linderlake'
+    WHEN UPPER(LR_RESPONSE_CONTRACTOR) LIKE '%SUNBELT%' or LOWER( otr_LocatorName) LIKE '%sunbelt%'
+    OR LOWER(otr_LocatorName) IN (
+        'allen barnes ( stake center )', 'andrew salud ( stake center )', 'arrilies arness biggs ( stake center )', 'fermin thomas stake center', 
+        'benneth anozie ad17537', 'william gilley ad51950', 'derrick spivey ad22163', 'frank crawford ad18620', 'joel harper', 'marc wasem ac11921', 
+        'nathaniel douglas wedlock ( stake center )', 'scott brahaney ad40021', 'gary richardson ad17204', 'jesus s maldonado ( stake center )', 'william gilley ad51950',
+        'arrilies arness biggs ( stake center )', 'terry rothlisberger ad20321', ''
+    ) THEN 'Sunbelt'
+    WHEN LOWER( otc_locatoremail) LIKE '%utilitiesplusllc.com%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%bill kulisek%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%james apker%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%joe sisson%'
+			THEN 'Utilities Plus'
+		WHEN LOWER( otr_LocatorName) LIKE '%amc%'
+			THEN 'AMC'
+		WHEN LOWER( otr_LocatorName) LIKE '%jose perez%'
+			THEN 'AMC'
+		WHEN LOWER( otr_LocatorName) LIKE '%daniel amaya%'
+			THEN 'AMC'
+		WHEN LOWER( otr_LocatorName) LIKE '%cody amby'
+			THEN 'Integrity Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%dan halloran%'
+			THEN '1st Call'
+		WHEN LOWER( otr_LocatorName) LIKE '%ben whitaker%'
+			THEN 'Baystate' 
+		WHEN LOWER( otr_LocatorName) LIKE '%dan burnette%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%donald mattox%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%harold phillips%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%jason overton%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%john siebert%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%ken lafo%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%lionel agosto%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%marc wasem%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%maurice ngalula%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%mendell newman%'
+			THEN 'Stake Center Locating'
+		WHEN LOWER( otr_LocatorName) LIKE '%paul werner%'
+			THEN 'Stake Center Locating'
+		WHEN  LR_RESPONSE_CONTRACTOR IS NULL
+			AND  LastRes_Date IS NOT NULL
+			THEN 'Internal'
+		ELSE  LR_RESPONSE_CONTRACTOR
+		END AS LastResponseCO
+		into #TempFinaltable
+FROM #TempFinaltable1
+
+
+IF OBJECT_ID('dbo.LDR_UTILISPHERE_TICKET_GREEN_OTC_T', 'U') IS NOT NULL
+BEGIN
+    DROP TABLE dbo.LDR_UTILISPHERE_TICKET_GREEN_OTC_T;
+END 
+
+	select * into dbo.LDR_UTILISPHERE_TICKET_GREEN_OTC_T from #TempFinaltable;
+
+END
 
