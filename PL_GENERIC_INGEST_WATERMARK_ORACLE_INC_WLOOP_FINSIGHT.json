@@ -1,0 +1,906 @@
+{
+    "name": "PL_GENERIC_INGEST_WATERMARK_ORACLE_INC_WLOOP_FINSIGHT",
+    "properties": {
+        "activities": [
+            {
+                "name": "Lookup Previous Watermark Value finsight",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "If Current Version Exists finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "SqlServerSource",
+                        "sqlReaderQuery": {
+                            "value": "select * from dbo.table_store_watermark_value where AdfJobName= '@{pipeline().parameters.AdfJobName}'",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "DS_SQL_Config41",
+                        "type": "DatasetReference"
+                    }
+                }
+            },
+            {
+                "name": "Get Metadata of Current Version finsight",
+                "type": "GetMetadata",
+                "dependsOn": [
+                    {
+                        "activity": "If Staging Exists finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "dataset": {
+                        "referenceName": "Azure_Databricks_LandingZone",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "ADLSStoragePath": {
+                                "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                "type": "Expression"
+                            },
+                            "ADLSContainerName": {
+                                "value": "@pipeline().parameters.ADLSContainerName",
+                                "type": "Expression"
+                            }
+                        }
+                    },
+                    "fieldList": [
+                        "exists"
+                    ],
+                    "storeSettings": {
+                        "type": "AzureBlobFSReadSettings",
+                        "recursive": true,
+                        "enablePartitionDiscovery": false
+                    },
+                    "formatSettings": {
+                        "type": "ParquetReadSettings"
+                    }
+                }
+            },
+            {
+                "name": "Get Metadata of Staging Version finsight",
+                "type": "GetMetadata",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "dataset": {
+                        "referenceName": "Azure_Databricks_LandingZone",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "ADLSStoragePath": {
+                                "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                "type": "Expression"
+                            },
+                            "ADLSContainerName": {
+                                "value": "@pipeline().parameters.ADLSContainerName",
+                                "type": "Expression"
+                            }
+                        }
+                    },
+                    "fieldList": [
+                        "exists"
+                    ],
+                    "storeSettings": {
+                        "type": "AzureBlobFSReadSettings",
+                        "recursive": true,
+                        "enablePartitionDiscovery": false
+                    },
+                    "formatSettings": {
+                        "type": "ParquetReadSettings"
+                    }
+                }
+            },
+            {
+                "name": "If Staging Exists finsight",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Get Metadata of Staging Version finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@activity('Get Metadata of Staging Version finsight').output.exists",
+                        "type": "Expression"
+                    },
+                    "ifTrueActivities": [
+                        {
+                            "name": "Delete Staging Version finsight",
+                            "description": "Empty Staging Directory",
+                            "type": "Delete",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "dataset": {
+                                    "referenceName": "Azure_Databricks_LandingZone",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "ADLSStoragePath": {
+                                            "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                            "type": "Expression"
+                                        },
+                                        "ADLSContainerName": {
+                                            "value": "@pipeline().parameters.ADLSContainerName",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                },
+                                "enableLogging": false,
+                                "storeSettings": {
+                                    "type": "AzureBlobFSReadSettings",
+                                    "recursive": true,
+                                    "wildcardFileName": "*",
+                                    "enablePartitionDiscovery": false
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "If Current Version Exists finsight",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Get Metadata of Current Version finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@activity('Get Metadata of Current Version finsight').output.exists",
+                        "type": "Expression"
+                    },
+                    "ifTrueActivities": [
+                        {
+                            "name": "Move Current Version to Archived finsight",
+                            "type": "Copy",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "ParquetSource",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSReadSettings",
+                                        "recursive": true,
+                                        "wildcardFolderPath": {
+                                            "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                            "type": "Expression"
+                                        },
+                                        "wildcardFileName": "*.parquet",
+                                        "enablePartitionDiscovery": false
+                                    },
+                                    "formatSettings": {
+                                        "type": "ParquetReadSettings"
+                                    }
+                                },
+                                "sink": {
+                                    "type": "ParquetSink",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSWriteSettings"
+                                    },
+                                    "formatSettings": {
+                                        "type": "ParquetWriteSettings"
+                                    }
+                                },
+                                "enableStaging": false,
+                                "translator": {
+                                    "type": "TabularTranslator",
+                                    "typeConversion": true,
+                                    "typeConversionSettings": {
+                                        "allowDataTruncation": true,
+                                        "treatBooleanAsNumber": false
+                                    }
+                                }
+                            },
+                            "inputs": [
+                                {
+                                    "referenceName": "Azure_Databricks_LandingZone",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "ADLSStoragePath": {
+                                            "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                            "type": "Expression"
+                                        },
+                                        "ADLSContainerName": {
+                                            "value": "@pipeline().parameters.ADLSContainerName",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "Azure_Databricks_LandingZone",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "ADLSStoragePath": {
+                                            "value": "@concat('/external_archival/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                            "type": "Expression"
+                                        },
+                                        "ADLSContainerName": {
+                                            "value": "@pipeline().parameters.ADLSContainerName",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Delete Current Version finsight",
+                            "type": "Delete",
+                            "dependsOn": [
+                                {
+                                    "activity": "Move Current Version to Archived finsight",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "dataset": {
+                                    "referenceName": "Azure_Databricks_LandingZone",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "ADLSStoragePath": {
+                                            "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                            "type": "Expression"
+                                        },
+                                        "ADLSContainerName": {
+                                            "value": "@pipeline().parameters.ADLSContainerName",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                },
+                                "enableLogging": false,
+                                "storeSettings": {
+                                    "type": "AzureBlobFSReadSettings",
+                                    "recursive": true,
+                                    "wildcardFileName": "*",
+                                    "enablePartitionDiscovery": false
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Update WaterMark Value Oracle finsight",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "ForEach1",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": "[dbo].[Update_WaterMark_Value]",
+                    "storedProcedureParameters": {
+                        "AdfJobName": {
+                            "value": {
+                                "value": "@pipeline().parameters.AdfJobName",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "TableName": {
+                            "value": {
+                                "value": "@pipeline().parameters.SourceTableName",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "watermark": {
+                            "value": {
+                                "value": "@activity('Lookup Current Watermark Value ORACLE finsight_loop').output.value[sub(length(activity('Lookup Current Watermark Value ORACLE finsight_loop').output.value), 1)].end_time",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Copy data to ADLS from Staging Oracle",
+                "type": "Copy",
+                "dependsOn": [
+                    {
+                        "activity": "Update WaterMark Value Oracle finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "ParquetSource",
+                        "storeSettings": {
+                            "type": "AzureBlobFSReadSettings",
+                            "recursive": true,
+                            "wildcardFileName": "*.parquet",
+                            "enablePartitionDiscovery": false
+                        },
+                        "formatSettings": {
+                            "type": "ParquetReadSettings"
+                        }
+                    },
+                    "sink": {
+                        "type": "ParquetSink",
+                        "storeSettings": {
+                            "type": "AzureBlobFSWriteSettings",
+                            "blockSizeInMB": 100
+                        },
+                        "formatSettings": {
+                            "type": "ParquetWriteSettings"
+                        }
+                    },
+                    "enableStaging": false,
+                    "translator": {
+                        "type": "TabularTranslator",
+                        "typeConversion": true,
+                        "typeConversionSettings": {
+                            "allowDataTruncation": true,
+                            "treatBooleanAsNumber": false
+                        }
+                    }
+                },
+                "inputs": [
+                    {
+                        "referenceName": "Azure_Databricks_LandingZone",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "ADLSStoragePath": {
+                                "value": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                "type": "Expression"
+                            },
+                            "ADLSContainerName": {
+                                "value": "@pipeline().parameters.ADLSContainerName",
+                                "type": "Expression"
+                            }
+                        }
+                    }
+                ],
+                "outputs": [
+                    {
+                        "referenceName": "Azure_Databricks_LandingZone",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "ADLSStoragePath": {
+                                "value": "@concat('/external/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                "type": "Expression"
+                            },
+                            "ADLSContainerName": {
+                                "value": "@pipeline().parameters.ADLSContainerName",
+                                "type": "Expression"
+                            }
+                        }
+                    }
+                ]
+            },
+            {
+                "name": "Trigger DLT Job Oracle finsight",
+                "type": "WebActivity",
+                "dependsOn": [
+                    {
+                        "activity": "Copy data to ADLS from Staging Oracle",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "method": "POST",
+                    "url": "https://adb-740797236825868.8.azuredatabricks.net/api/2.1/jobs/run-now",
+                    "connectVia": {
+                        "referenceName": "shir-sub-dlhfinance-dev-01",
+                        "type": "IntegrationRuntimeReference"
+                    },
+                    "body": {
+                        "value": "{\"job_id\":@{pipeline().parameters.JobId}}",
+                        "type": "Expression"
+                    },
+                    "authentication": {
+                        "resource": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d",
+                        "credential": {
+                            "referenceName": "spn_dev_dlhfinance",
+                            "type": "CredentialReference"
+                        },
+                        "userTenant": "72b17115-9915-42c0-9f1b-4f98e5a4bcd2"
+                    }
+                }
+            },
+            {
+                "name": "Lookup Current Watermark Value ORACLE finsight_loop",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "Lookup Previous Watermark Value finsight",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "OracleSource",
+                        "oracleReaderQuery": {
+                            "value": "@replace(\n  replace(\n    pipeline().parameters.IndField,\n    '[start]',\n    replace(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 'T', ' ')\n  ),\n  '[end]',\n  formatDateTime(\n    addHours(activity('Lookup Previous Watermark Value finsight').output.firstRow.WatermarkValue, 24),\n    'yyyy-MM-dd HH:mm:ss'\n  )\n)",
+                            "type": "Expression"
+                        },
+                        "partitionOption": "None",
+                        "convertDecimalToInteger": false,
+                        "queryTimeout": "02:00:00"
+                    },
+                    "dataset": {
+                        "referenceName": "Oracle_Generic",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "HostName": {
+                                "value": "@pipeline().parameters.SourceServerName",
+                                "type": "Expression"
+                            },
+                            "PortNumber": {
+                                "value": "@pipeline().parameters.PortNumber",
+                                "type": "Expression"
+                            },
+                            "ServiceName": {
+                                "value": "@pipeline().parameters.ServiceName",
+                                "type": "Expression"
+                            },
+                            "UserName": {
+                                "value": "@pipeline().parameters.SourceDBuserName",
+                                "type": "Expression"
+                            },
+                            "SourceType": {
+                                "value": "@pipeline().parameters.SourceType",
+                                "type": "Expression"
+                            },
+                            "SourceDBName": {
+                                "value": "@pipeline().parameters.SourceDBName",
+                                "type": "Expression"
+                            },
+                            "UserKey": {
+                                "value": "@pipeline().parameters.UserKey",
+                                "type": "Expression"
+                            }
+                        }
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "ForEach1",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "Lookup Current Watermark Value ORACLE finsight_loop",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('Lookup Current Watermark Value ORACLE finsight_loop').output.value",
+                        "type": "Expression"
+                    },
+                    "batchCount": 1,
+                    "activities": [
+                        {
+                            "name": "Copy data to Staging Oracle finsight",
+                            "type": "Copy",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "OracleSource",
+                                    "oracleReaderQuery": {
+                                        "value": "@if(\n    and(contains(pipeline().parameters.SourceQuery, '[start]'), contains(pipeline().parameters.SourceQuery, '[end]')),\n    replace(\n        replace(pipeline().parameters.SourceQuery, '[start]', item().start_time),\n        '[end]', item().end_time\n    ),\n    concat(\n        pipeline().parameters.SourceQuery,\n        ' WHERE ',\n        pipeline().parameters.WaterMarkColumnName,\n        ' >= TO_DATE(''', item().start_time, ''', ''YYYY-MM-DD HH24:MI:SS'')',\n        ' AND ',\n        pipeline().parameters.WaterMarkColumnName,\n        ' < TO_DATE(''', item().end_time, ''', ''YYYY-MM-DD HH24:MI:SS'')'\n    )\n)",
+                                        "type": "Expression"
+                                    },
+                                    "partitionOption": "None",
+                                    "convertDecimalToInteger": false,
+                                    "queryTimeout": "02:00:00"
+                                },
+                                "sink": {
+                                    "type": "ParquetSink",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSWriteSettings",
+                                        "blockSizeInMB": 100
+                                    },
+                                    "formatSettings": {
+                                        "type": "ParquetWriteSettings"
+                                    }
+                                },
+                                "enableStaging": false,
+                                "translator": {
+                                    "type": "TabularTranslator",
+                                    "typeConversion": true,
+                                    "typeConversionSettings": {
+                                        "allowDataTruncation": true,
+                                        "treatBooleanAsNumber": false
+                                    }
+                                }
+                            },
+                            "inputs": [
+                                {
+                                    "referenceName": "Oracle_Generic",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "HostName": {
+                                            "value": "@pipeline().parameters.SourceServerName",
+                                            "type": "Expression"
+                                        },
+                                        "PortNumber": {
+                                            "value": "@pipeline().parameters.PortNumber",
+                                            "type": "Expression"
+                                        },
+                                        "ServiceName": "@pipeline().parameters.ServiceName",
+                                        "UserName": "@pipeline().parameters.SourceDBuserName",
+                                        "SourceType": {
+                                            "value": "@pipeline().parameters.SourceType",
+                                            "type": "Expression"
+                                        },
+                                        "SourceDBName": {
+                                            "value": "@pipeline().parameters.SourceDBName",
+                                            "type": "Expression"
+                                        },
+                                        "UserKey": {
+                                            "value": "@pipeline().parameters.UserKey",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "Azure_Databricks_LandingZone",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "ADLSStoragePath": "@concat('/external_staging/volumes/',pipeline().parameters.TargetDBName,'/',pipeline().parameters.TargetSchemaName,'/',pipeline().parameters.TargetTableName)",
+                                        "ADLSContainerName": "@pipeline().parameters.ADLSContainerName"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Insert Log Success Oracle finsight",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Copy data to Staging Oracle finsight",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": "[dbo].[InsertLog]",
+                                "storedProcedureParameters": {
+                                    "BronzeCount": {
+                                        "value": {
+                                            "value": "@activity('Copy data to Staging Oracle finsight').output.rowsCopied",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "DbName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.SourceDBName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "RunStatus": {
+                                        "value": "Sucess",
+                                        "type": "String"
+                                    },
+                                    "ServerName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.SourceServerName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "SourceCount": {
+                                        "value": {
+                                            "value": "@activity('Copy data to Staging Oracle finsight').output.rowsRead",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "TableName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.SourceTableName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "error": {
+                                        "value": "",
+                                        "type": "String"
+                                    },
+                                    "AdfJobName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.AdfJobName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Insert Log Failure Oracle finsight",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Copy data to Staging Oracle finsight",
+                                    "dependencyConditions": [
+                                        "Failed"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": "[dbo].[InsertLog]",
+                                "storedProcedureParameters": {
+                                    "BronzeCount": {
+                                        "value": {
+                                            "value": "@activity('Copy data to Staging Oracle finsight').output?.rowsCopied",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "DbName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.SourceDBName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "RunStatus": {
+                                        "value": "Failure",
+                                        "type": "String"
+                                    },
+                                    "ServerName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.SourceServerName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "SourceCount": {
+                                        "value": {
+                                            "value": "@activity('Copy data to Staging Oracle finsight').output?.rowsRead",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "TableName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.SourceTableName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "error": {
+                                        "value": {
+                                            "value": "@activity('Copy data to Staging Oracle finsight').error?.message",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "AdfJobName": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.AdfJobName",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "adf_linked_sqlsrv_adf_sub_dlhfinance_dev_01",
+                                "type": "LinkedServiceReference"
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "parameters": {
+            "SourceServerName": {
+                "type": "string"
+            },
+            "SourceDBName": {
+                "type": "string"
+            },
+            "SourceTableName": {
+                "type": "string"
+            },
+            "ADLSContainerName": {
+                "type": "string"
+            },
+            "WaterMarkColumnName": {
+                "type": "string"
+            },
+            "PortNumber": {
+                "type": "string"
+            },
+            "SourceType": {
+                "type": "string"
+            },
+            "SourceDBuserName": {
+                "type": "string"
+            },
+            "ServiceName": {
+                "type": "string"
+            },
+            "TargetDBName": {
+                "type": "string"
+            },
+            "TargetSchemaName": {
+                "type": "string"
+            },
+            "TargetTableName": {
+                "type": "string"
+            },
+            "UserKey": {
+                "type": "string"
+            },
+            "SourceQuery": {
+                "type": "string"
+            },
+            "SourceSchemaName": {
+                "type": "string"
+            },
+            "ClientId": {
+                "type": "string"
+            },
+            "AdfJobName": {
+                "type": "string"
+            },
+            "JobId": {
+                "type": "string"
+            },
+            "IndField": {
+                "type": "string"
+            }
+        },
+        "folder": {
+            "name": "FINSIGHT"
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-06-12T16:54:09Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}
