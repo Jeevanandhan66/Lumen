@@ -1,10 +1,76 @@
-col_name	data_type	comment
-table_name	string	null
-adfjobname	string	null
-columns_removed	array<string>	null
-columns_added	array<string>	null
-backfill_status	boolean	null
-backfill_completion_status	string	null
-audit_timestamp	timestamp	null
+# COMMAND ----------
+# DBTITLE 1,Schema Evolution Audit Logging
 
-select * from dev_udl_dlh_finance.finsight.finsight_schema_audit;
+from pyspark.sql import Row
+from pyspark.sql.functions import current_timestamp
+
+AUDIT_TABLE = "dev_udl_dlh_finance.finsight.finsight_schema_audit"
+
+try:
+
+    # ------------------------------------------------------------------
+    # Source schema
+    # ------------------------------------------------------------------
+    source_columns = {
+        f.name: f.dataType.simpleString()
+        for f in batch_df.schema.fields
+    }
+
+    # ------------------------------------------------------------------
+    # Target schema
+    # Replace target_table_name with your existing variable if different
+    # ------------------------------------------------------------------
+    target_schema = spark.table(target_table_name).schema
+
+    target_columns = {
+        f.name: f.dataType.simpleString()
+        for f in target_schema.fields
+    }
+
+    # ------------------------------------------------------------------
+    # Detect Changes
+    # ------------------------------------------------------------------
+    source_set = set(source_columns.keys())
+    target_set = set(target_columns.keys())
+
+    added_columns = sorted(list(source_set - target_set))
+    removed_columns = sorted(list(target_set - source_set))
+
+    datatype_changes = []
+
+    common_cols = source_set.intersection(target_set)
+
+    for c in common_cols:
+        if source_columns[c] != target_columns[c]:
+            datatype_changes.append(
+                f"{c} ({target_columns[c]} -> {source_columns[c]})"
+            )
+
+    # ------------------------------------------------------------------
+    # Log only if any schema change exists
+    # ------------------------------------------------------------------
+    if added_columns or removed_columns or datatype_changes:
+
+        audit_df = spark.createDataFrame(
+            [
+                Row(
+                    table_name=target_table_name,
+                    adfjobname=adf_job_name,
+                    columns_removed=removed_columns + datatype_changes,
+                    columns_added=added_columns,
+                    backfill_status=False,
+                    backfill_completion_status="PENDING",
+                    audit_timestamp=None
+                )
+            ]
+        ).withColumn("audit_timestamp", current_timestamp())
+
+        audit_df.write.mode("append").insertInto(AUDIT_TABLE)
+
+        print("Schema evolution logged successfully.")
+
+    else:
+        print("No schema evolution detected.")
+
+except Exception as ex:
+    print(f"Schema audit logging failed: {str(ex)}")
