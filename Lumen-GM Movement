@@ -1,3 +1,5 @@
-table_name	adfjobname	columns_removed	columns_added	backfill_status	backfill_completion_status	audit_timestamp
-dlhfin_adf_ingestionlog	adf_dlhfin_adf_ingestionlog_incremental	[]	["ADFJOBNAME","BRONZECOUNT","ID","RUNSTATUS","SOURCECOUNT","TABLENAME","UPDATEDATE"]	true	PENDING	2026-07-20T09:34:20.232+00:00
-dlhfin_adf_ingestionlog	adf_dlhfin_adf_ingestionlog_incremental	[]	["ADFJOBNAME","BRONZECOUNT","ID","SOURCECOUNT","TABLENAME","UPDATEDATE"]	true	PENDING	2026-07-20T10:37:34.363+00:00
+# Read the actual table schema instead of parsing DESCRIBE output
+existing_cols = {
+    field.name.upper()
+    for field in spark.table(full_table_name).schema.fields
+} - {c.upper() for c in PIPELINE_SYSTEM_COLUMNS}
