@@ -1,5 +1,16 @@
-# Read the actual table schema instead of parsing DESCRIBE output
-existing_cols = {
-    field.name.upper()
-    for field in spark.table(full_table_name).schema.fields
-} - {c.upper() for c in PIPELINE_SYSTEM_COLUMNS}
+%python
+df = (
+    spark.read
+         .option("header", "true")
+         .option("inferSchema", "true")
+         .csv("/Volumes/dev_landing_dlh_finance/finsight/stage/shared_dim_date.csv")
+)
+
+
+%python
+df.write \
+  .format("delta") \
+  .mode("overwrite") \
+  .saveAsTable("dev_udl_dlh_finance.finsight.sa_staging_shared_dim_date")
+
+select count(*) from dev_udl_dlh_finance.finsight.sa_staging_shared_dim_date
