@@ -1,1333 +1,567 @@
 USE [SA_Staging]
 GO
-/****** Object:  StoredProcedure [report].[usp_gfs_waves_tasks_details]    Script Date: 11/13/2026 12:43:02 PM ******/
+/****** Object:  StoredProcedure [report].[usp_OffNet_CFA_IC_Metrics]    Script Date: 11/13/2026 1:45:39 PM ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
 
 
-/************************************************************************************************************************************************************************
- Author:		kgkoch (Ken Koch)
- Create date:	2020-07-02
- Description:	Transition embedded sql in GFS SSRS report, "GFS Waves Tasks.rdl", to a stored procedure that creates a table for the report to pull from.  (BIRA 6201)
- 
+--EXEC [report].[usp_OffNet_CFA_IC_Metrics]
+
+/*************************************************************************************************************************************
+ Author: Phil Ferlin
+ Create date: 11/2/2017
+ Description: This stored procedure to support the SSRS Report "OffNet IC Dashboard".  The dataset within the main dashboard .rdl has
+              become too large and had to be converted to a stored procedure call from the report.
+
+-------------------------------------------------------------------------------------------------------------------------------------
  Ver		Date			Author			Desc
- ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- 1.0		2020-07-02		kgkoch			Created Proc and mod to add task_end_time, incl 'Completed' tasks, and to use new table, related_orders_w_hybrids (incl Installed).
- 1.1		2020-12-15		kgkoch			Eliminate cast as numeric for task_id (#task_details_join) - causing error.
- 1.2		2021-05-20		Chad Tj			Added new dep on load order details and change vw to tbl for m/l data
- 1.3		2026-01-12		Madhu			TASK3966011 - Removed tbl_omc_assignment table as the data is stale due to OMC decom.
-*************************************************************************************************************************************************************************/
+ ------------------------------------------------------------------------------------------------------------------------------------
+ 1.0        2017-11-02      Phil F			Created Proc
+ 1.1		2017-11-14		Phil F			Added new bandwidth parameter and filtering on each section for bandwidth.  BIRA 3,758
+ 1.2		2017-11-15		Phil F			Added new subinterval for CSD to ISD.  BIRA 3,787
+ 1.3		2017-11-17		Phil F			Added code to exclude specific disconnect activities where there is a corresponding Install 
+											PON on same SWIFT/CPO Order Number
+ 1.4		2017-12-02		Phil F			For all Subinterval segments, increased decimal(5,1) to decimal(7,1)
+ 1.5		2018-02-05		Phil F			Changed final result set to include Full Name values from the #List temp table
+ 1.6		2018-02-07		Phil F			Changed the off-net organization view from vw_paula_lee_org to vw_offnet_prov_org
+ 1.7		2018-06-04		Phil F			Performance tuning.  Dashboard has been taking too long to run.
+ 1.8		2018-06-20		Phil F			Additional Performance tuning.
+ 1.9		2018-08-07		Prasanth		BIRA#4713: Lot of duplicates in snapshot tables due to PON='RED HYBRID'. Removed duplicates using 'distinct'.
+ 2.0		2018-08-27		Divya A			BIRA#4557: Fixed srvc order unit match impression to include "/" in Issue ASR Metrics section.
+ 2.1        2018-12-18      Deovrat S.      BIRA#4244: Adding FIRST FOC Received to task completion; additions for requests 4666 and 4668 as well.
+ 2.2		2019-08-22		Prasanth I.		BIRA#4714: Added 'mon' field to all temp tables involved in the final query. This is to achieve the monthly roll up of data in the report.
+ 2.3		2022-10-21		Kirti S			TASK2291681: Added CFA tasks worked in flight Deck
+ 2.4		2025-04-21		Madhu			TASK3639736 || As part of BIRA standardization, modified the complete procedure to build the tables as per the new standard PowerBI report
+ 2.5		2026-04-22		Madhu			INC7735125 || Included Status change data to eliminate the idle time between completed and restart of the task
+*************************************************************************************************************************************/
 
-ALTER PROCEDURE [report].[usp_gfs_waves_tasks_details] @iAgentJob varchar(1000) = NULL
-
---FOR TESTING: exec [report].[usp_gfs_waves_tasks_details]
+ALTER proc [report].[usp_OffNet_CFA_IC_Metrics]
 AS
 BEGIN
-	SET NOCOUNT ON;
-
-	--Declare a variable to handle the agent job NULL and apply the host name running if manual
-	DECLARE @vAgentJob VARCHAR(1000) = isNull(@iAgentJob,'Manual Run ('+HOST_NAME()+')');
-	DECLARE @vProcessName VARCHAR(200) = 'report_gfs_waves_tasks_details update';
-
-	-----------------------------
-	-- Process Start
-	-----------------------------
-	--Log Job Start with Server and Job Name included.  USE THIS ONE IF THE PROCEDURE IS CALLED FROM A JOB
-EXEC dbo.sp_jv_update
- 		 @reportname = @vProcessName
-		,@updatetype = 0
-		,@source_server = @@SERVERNAME 
-		,@source_job = @vAgentJob
 
 
-	TRUNCATE TABLE report.gfs_waves_tasks_details;
+EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 1',0;
 
-	BEGIN TRY	--STORED PROCEDURE BODY BEGIN
+IF OBJECT_ID('tempdb..#tbl_ic_offnet_dashboard_cfa_dos_tasks') IS NOT NULL DROP TABLE #tbl_ic_offnet_dashboard_cfa_dos_tasks
+IF OBJECT_ID('tempdb..#tbl_ic_offnet_dashboard_cfa_jeops_from_cods') IS NOT NULL DROP TABLE #tbl_ic_offnet_dashboard_cfa_jeops_from_cods
+IF OBJECT_ID('tempdb..#Tbl_Ic_Offnet_Assign_Cfa_New') IS NOT NULL DROP TABLE #Tbl_Ic_Offnet_Assign_Cfa_New
 
-	DECLARE @p_hist_dt DATETIME = dbo.trunc(getdate())
-
-
-IF OBJECT_ID('tempdb..#tasklist') IS NOT NULL
-	DROP TABLE #tasklist;
-
-SELECT DISTINCT task_name
-INTO #tasklist
-FROM task_details WITH (NOLOCK)
-WHERE task_source = 'BPM'
-	AND TASK_NAME LIKE '%test%assist%'
-
-INSERT INTO #tasklist
-VALUES ('InstallCrossConnect')
-	,('InstallPreWireTransport')
-	,('LOA/CFA Process Field Install')
-	,('install_equipment')
-	,('Install Equipment')
-	,('Service Validate Field')
-	,('Service Validate Field - Uncoordinated')
-
---select * from #tasklist
-IF object_id('tempdb..#related_ords') IS NOT NULL
-	DROP TABLE #related_ords;
-
-SELECT *
-INTO #related_ords
-FROM related_orders_w_hybrids WITH (NOLOCK);
-
-IF object_id('tempdb..#sou_limit') IS NOT NULL
-	DROP TABLE #sou_limit;
-
-SELECT DISTINCT
-	k.order_item AS srvc_order_unit
-	,k.primary_order_item AS orig_srvc_order_unit
-	,k.unified_mrr AS mrr
-	,k.customer_commit_dt as cust_commit_dt
-	,k.prov_product as product_instance_id
-	,k.source_system
-	,'N' as cnr_flag --k.cnr_flag
-	--,w.OMC_SOU
-	,omc.OMC_SOU
-	,k.product
-	,k.product_family_name
-	--,w.tester
-	,omc.tester
-	,k.order_number
-	,w.[net ind] AS net_ind
-	,w.[business org name] AS business_org_name
-	,w.[cust req dt] AS cust_req_dt
-	--,w.ccm
-	--,omc.ccm
-	,w.ccm_login as ccm
-	--,w.CCMMngr
-	,CCMMngr = isnull(d.mgr_nt_login,'Unknown')
-	--,w.functional_group
-	,case when	w.[prod type] = 'Level3 Waves Service' or w.bandwidth_grp in ('10G','10GE','2.5G') then 'Wave'
-		when	w.[prov product] = 'EPL' then 'EPL'
-		when	w.[prov family] = 'IP' then 'IP'
-		when	w.[prov family] in ('Softswitch','Softswtich') then 'Voice'
-		when	w.[prov product] like '%IP%' or  w.[prov product] = 'Internet' then 'IP'
-		when	w.[prov family] in ('Dark Fiber','Gateway') then 'Infra'
-		when	w.[prov product] = 'Private Room' then 'Infra'
-		when	w.[prov product] like '%voice%' or  w.[prov product] = 'Trunk Group' or	w.[prov product] like '%POTS%' then 'Voice'
-		when	w.[prov family] in ('Transport','DAL','CDN') then 'PL'
-		when	w.[prov family] = 'Crossconnect' or	w.[prov product] = 'CrossConnect Bulk Cable' then 'XC'
-		else 'Other'				
-	end functional_group
-	--,w.provmngr
-	,provmngr = isnull(e.mgr_nt_login,'Unknown')
-	,w.[orig cust commit dt rpt] AS orig_cust_commit_dt_rpt
-	,k.bandwidth
-	,w.sales_region
-	,w.operating_region_cd
-INTO #sou_limit
-FROM #related_ords k WITH (NOLOCK)
---LEFT OUTER JOIN vw_monthly_opportunity_combined_allregions w WITH (NOLOCK) ON k.order_item = w.[srvc order unit]
-LEFT OUTER JOIN tbl_k_mart_daily_w_metasolv_and_latam w WITH (NOLOCK) ON k.order_item = w.[srvc order unit]
-left outer join dbo.CSD_IC_Employee d on w.ccm_login = d.nt_login and d.retired = 'n'
-left join (
-	SELECT
-		 [Srvc Order Unit]
-		,MAX(OMC_SOU) AS OMC_SOU
-		,MAX(Provisioner) AS Provisioner
-		,MAX(Tester) AS Tester
-		--,MAX(CCM) AS CCM
-	FROM sa_staging.dbo.xref_order_assignees with (nolock)
-	GROUP BY [Srvc Order Unit]) omc ON k.order_item = omc.[srvc order unit]
---left outer join dbo.CSD_IC_Employee d on omc.ccm = d.nt_login and d.retired = 'n'
-left outer join dbo.CSD_IC_Employee e on omc.provisioner = e.nt_login and e.retired = 'n'
-
-WHERE
-	k.sales_region in ('NA','EMEA')
-	AND (k.product_family_name = 'wavelengths' OR k.functional_group = 'wave')
-	AND w.[gl product family name] <> 'Colocation'
-	AND isnull(w.long_term_customer_delay_flag, 'N') = 'N'
-	AND (
-		CASE 
-			WHEN w.Off_net_resp_org_name IS NOT NULL
-				AND charindex(':', w.Off_net_resp_org_name) = 0
-				THEN w.Off_net_resp_org_name
-			WHEN w.Off_net_resp_org_name IS NOT NULL
-				THEN left(w.Off_net_resp_org_name, charindex(':', w.Off_net_resp_org_name) - 1)
-			WHEN charindex(':', w.On_Net_resp_org_name) = 0
-				THEN w.On_Net_resp_org_name
-			ELSE left(w.On_Net_resp_org_name, charindex(':', w.On_Net_resp_org_name) - 1)
-			END IN (
-			'cti'
-			,'gfs'
-			,'cti waves'
-			)
-		OR CASE 
-			WHEN charindex(':', w.On_Net_resp_org_name) = 0
-				THEN w.On_Net_resp_org_name
-			ELSE left(w.On_Net_resp_org_name, charindex(':', w.On_Net_resp_org_name) - 1)
-			END IN ( 
-			'cti'
-			,'gfs'
-			,'cti waves'
-			)
-		)
-	AND (
-		w.On_Net_resp_org_name IS NULL
-		OR w.On_Net_resp_org_name <> 'CTI: Parked'
-		)
-	AND (
-		w.Off_net_resp_org_name IS NULL
-		OR w.Off_net_resp_org_name <> 'CTI: Parked'
-		)
-	AND k.customer_commit_dt IS NOT NULL
-	AND k.is_primary = 1
-
---select * from #sou_limit where order_number  = '1-1496488514'
-IF OBJECT_ID('tempdb..#tsk_join_prep') IS NOT NULL
-	DROP TABLE #tsk_join_prep;
-
-SELECT *
-INTO #tsk_join_prep
-FROM (
-
-	SELECT w.primary_order_item
-		,w.order_item as task_order_item
-		,w.source
-		,w.source_system
-		,sl.sales_region
-		,sl.operating_region_cd
-		,1 AS subquery_id
-	FROM #related_ords w
-	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
-	WHERE w.omc_order_item IS NOT NULL
-
-	UNION
-	
-	SELECT w.primary_order_item
-		,w.OMC_service_order AS task_order_item
-		,w.source
-		,w.source_system
-		,sl.sales_region
-		,sl.operating_region_cd
-		,2 AS subquery_id
-	FROM #related_ords w
-	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
-	WHERE OMC_service_order IS NOT NULL
-	
-	UNION
-	
-	SELECT w.primary_order_item
-		,w.order_item AS task_order_item
-		,w.source
-		,w.source_system
-		,sl.sales_region
-		,sl.operating_region_cd
-		,3 AS subquery_id
-	FROM #related_ords w
-	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
-	WHERE w.order_item IS NOT NULL
-		AND w.source LIKE 'related%'
-		AND (
-			w.order_item <> omc_service_order
-			OR omc_service_order IS NULL
-			)
-		AND (w.order_item <> w.omc_order_item)
-	
-	UNION
-	
-	SELECT w.primary_order_item
-		,sl.product_instance_id AS task_order_item
-		,w.source
-		,sl.source_system
-		,sl.sales_region
-		,sl.operating_region_cd
-		,4 AS subquery_id
-	FROM #related_ords w
-	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
-	WHERE sl.srvc_order_unit IS NOT NULL AND w.source NOT IN ('hybrid')
-	
-	UNION
-	
-	SELECT primary_order_item
-		,w.OMC_order_item --right(w.OMC_order_item, len(w.OMC_order_item) - 9) AS task_order_item
-		,w.source
-		,sl.source_system
-		,sl.sales_region
-		,sl.operating_region_cd
-		,5 AS subquery_id
-	FROM #related_ords w
-	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = primary_order_item
-	WHERE order_item IS NOT NULL
-		AND w.source_system = 'pipeline'
-		AND charindex('-', w.OMC_order_item) > 0
-		AND len(w.OMC_order_item) > 9
-	
-	UNION
-	
-	SELECT primary_order_item
-		,replace(primary_order_item, '/', '-') AS task_order_item
-		,w.source
-		,sl.source_system
-		,sl.sales_region
-		,sl.operating_region_cd
-		,6 AS subquery_id
-	FROM #related_ords w
-	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = primary_order_item
-	WHERE order_item IS NOT NULL
-	
-	UNION
-	
-	SELECT primary_order_item
-		,k.[srvc order unit] AS task_order_item
-		,source
-		,w.source_system
-		,sl.sales_region
-		,sl.operating_region_cd
-		,7 AS subquery_id
-	FROM #related_ords w
-	INNER JOIN #sou_limit sl --UPDATE 004
-		ON sl.srvc_order_unit = primary_order_item
-	LEFT OUTER JOIN tbl_k_mart_daily_w_metasolv_and_latam k ON w.omc_service_order = k.[product instance id]
-	WHERE order_item IS NOT NULL
-	) a;
-
---select * from #tsk_join_prep
-IF OBJECT_ID('tempdb..#task_details_join') IS NOT NULL
-	DROP TABLE #task_details_join;
-
-CREATE TABLE #task_details_join (
-	primary_order_item VARCHAR(256)
-	,task_order_item VARCHAR(256)
-	,source VARCHAR(16)
-	,sales_region VARCHAR(256)
-	,operating_region_cd VARCHAR(256)
-	,task_name VARCHAR(512)
-	,task_assignee VARCHAR(512)
-	,task_due_date DATETIME
-	,work_site_location VARCHAR(256)
-	,dispatch_gateway_CLLI VARCHAR(256)
-	,service_id VARCHAR(256)
-	--,task_id NUMERIC(38, 0)
-	,task_id VARCHAR(64)
-	,tsk_src VARCHAR(16)
-	,task_status VARCHAR(32)
-	,task_start_time DATETIME
-	,task_end_time DATETIME
-	,rownum INT
-	,dept VARCHAR(64)
-	,title VARCHAR(64)
-	,mgr VARCHAR(256)
+CREATE TABLE #tbl_ic_offnet_dashboard_cfa_dos_tasks(
+	[Customer_Order_Id] [varchar](250) NULL,
+	[Service_Order_Id] [varchar](250) NULL,
+	[Process_Nid] [numeric](18, 0) NULL,
+	[Task_Nid] [numeric](22, 0) NOT NULL,
+	[Performer_Name] [varchar](300) NULL,
+	[Task_Name] [varchar](1000) NOT NULL,
+	[Task_Status] [varchar](30) NULL,
+	[Task_Start_Time] [datetime] NULL,
+	[Task_End_Time] [datetime] NULL,
+	[Source_System] [varchar](64) NULL,
+	[So_Service_Id] [varchar](1024) NULL,
+	[Process_Id] [varchar](250) NULL,
+	[Task_Id] [varchar](1000) NULL,
+	[Bandwdth_Cd] [nvarchar](30) NULL,
+	[Sub_Bandwdth_Cd] [nvarchar](30) NULL,
+	[Task_Source] [varchar](100) NULL
 	)
 
-INSERT INTO #task_details_join
-SELECT DISTINCT b.*
-	,isnull(g1.dept_name, b.task_assignee) AS dept
-	,isnull(g1.job_title, b.task_assignee) AS title
-	,isnull(g1.supervisor_name, b.task_assignee) AS mgr
-FROM (
-	SELECT a.*
-		,row_number() OVER (
-			PARTITION BY task_id ORDER BY CASE 
-					WHEN source = 'related items'
-						THEN 1
-					WHEN source = 'related orders'
-						THEN 2
-					WHEN source = 'hybrid'
-						THEN 3
-					END
-				,primary_order_item desc
-				,isnull(task_due_date, '2099-12-31')
-			) AS rownum
-	FROM (
-		SELECT DISTINCT w.primary_order_item
-			,w.task_order_item
-			,w.source
-			,w.sales_region
-			,w.operating_region_cd
-			,CASE 
-				WHEN w.source = 'hybrid'
-					THEN 'Hybrid: ' + tsk.task_name
-				WHEN w.source LIKE 'related order%'
-					THEN 'Related: ' + tsk.task_name
-				ELSE tsk.task_name
-				END AS task_name
-			,CASE 
-				WHEN tsk.task_assignee = 'walsh.brian' THEN 'walsh.brian2' ELSE tsk.task_assignee END AS task_assignee
-			,tsk.task_due_date
-			,tsk.work_site_location
-			,tsk.dispatch_gateway_CLLI
-			,tsk.service_id
-			--,cast(tsk.task_id AS NUMERIC(38, 0)) AS task_id
-			,tsk.task_id
-			,'task_details' AS tsk_src
-			,tsk.cods_task_status AS task_status
-			,tsk.task_start_date
-			,tsk.task_end_date AS task_end_time
-		FROM task_details tsk WITH (NOLOCK)
-		INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.task_sou
-		INNER JOIN #tasklist tl	on tsk.task_name = tl.task_name
-		WHERE tsk.task_derived_status IN (
-				'Completed'
-				, 'In Progress'
-				, 'Manual Task'
-				, 'Pending')
-			AND (tsk.task_start_date IS NOT NULL OR tsk.task_assignee IS NOT NULL)
-			--AND w.source not in ('EON', 'GC_EON', 'Global Crossing')
-		) a
-	) b
-LEFT OUTER JOIN galcapture g1 WITH (NOLOCK) ON b.task_assignee = g1.nt_login
-WHERE rownum = 1
+CREATE TABLE #tbl_ic_offnet_dashboard_cfa_jeops_from_cods(
+	[customer_order_id] [varchar](250) NULL,
+	[service_order_id] [varchar](100) NULL,
+	[process_nid] [numeric](18, 0) NULL,
+	[task_nid] [numeric](22, 0) NULL,
+	[jeopardy_reason_cd] [varchar](256) NULL,
+	[jeopardy_raised_dt] [datetime] NULL,
+	[raised_by_performer_name] [varchar](256) NULL,
+	[jeopardy_resolution_dt] [datetime] NULL,
+	[jeopardy_resolved_ind] [varchar](1) NULL,
+	[resolved_by_performer_name] [varchar](256) NULL,
+	[process_id] [varchar](250) NULL,
+	[task_id] [varchar](1000) NULL,
+	[task_source] [varchar](100) NULL
+)
 
---select * from #task_details_join
-IF OBJECT_ID('tempdb..#sel_jeop') IS NOT NULL
-	DROP TABLE #sel_jeop
+CREATE TABLE #Tbl_Ic_Offnet_Assign_Cfa_New(
+	[CUSTOMER_ORDER_ID] [varchar](240) NULL,
+	[SERVICE_ORDER_ID] [varchar](240) NULL,
+	[PERFORMER_NAME] [varchar](1024) NULL,
+	[TASK_START_TIME] [datetime] NULL,
+	[TASK_END_TIME] [datetime] NULL,
+	[Intvl_Bus_Hrs] [int] NULL,
+	[SLA_Met] [int] NULL,
+	[Data_Src_Cd] [varchar](100) NULL,
+	[Min_Jeop_Open] [datetime] NULL,
+	[Max_Jeop_Close] [datetime] NULL,
+	[Jeop_Intvl] [int] NULL,
+	[process_NID] [numeric](22, 0) NULL,
+	[task_NID] [numeric](22, 0) NULL,
+	[Task_Name] [varchar](1408) NULL,
+	[so_service_id] [varchar](1000) NULL,
+	[Task_Id] [varchar](1000) NULL,
+	[Adjusted_Intvl] [int] NULL,
+	[Adjusted_Intvl_SLA_Met] [int] NULL,
+	[Inventory_Design_Id] [varchar](100) NULL,
+	[Srvc_Order_Unit] [varchar](100) NULL,
+	[Net_Bus_Minutes] [int] NULL,
+	[Bus_Minutes_SLA_Met_Int] [int] NULL,
+	[Bus_Minutes_SLA_Met] [varchar](100) NULL,
+	[Bus_Minutes_SLA_Met_NoJeopExcluded_Int] [int] NULL,
+	[Bus_Minutes_SLA_Met_NoJeopExcluded] [varchar](100) NULL,
+	[Net_Bus_Minutes_NoJeopTimeExcluded] [int] NULL,
+)
+EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 1',1;
+EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 2',0;
 
-SELECT j.task_id
-	,j.jeopardy_raised_dt
-	,row_number() OVER (
-		PARTITION BY j.task_id ORDER BY j.jeopardy_raised_dt
-		) AS Jeop_raise_order
-	,j.jeopardy_nid
-	,row_number() OVER (
-		PARTITION BY j.task_id ORDER BY j.jeopardy_nid
-		) AS jeop_nid_order
-	,row_number() OVER (
-		PARTITION BY j.task_id ORDER BY CASE 
-				WHEN j.jeopardy_reason_cd = 'GFSINCDSGN'
-					OR j.short_description IN (
-						'Design Error/Incomplete'
-						,'Design Error/Inc'
-						)
-					THEN 0
-				ELSE 1
-				END
-			,j.jeopardy_nid DESC
-		) AS jeop__order
-INTO #sel_jeop
-FROM [CODS_Workflow__Jeopardy] j WITH (NOLOCK)
-INNER JOIN #task_details_join tsk WITH (NOLOCK) ON tsk.task_id = j.task_id
-	AND tsk.source <> 'Related'
-
-IF OBJECT_ID('tempdb..#SV_Tester') IS NOT NULL
-	DROP TABLE #SV_Tester
-
-SELECT DISTINCT w.primary_order_item
-	,tsk.task_assignee
-INTO #SV_Tester
-FROM task_details tsk
-INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.task_sou
---		and w.source <> 'related'
-WHERE tsk.task_name IN (
-		'service validate'
-		,'service validate uni'
-		,'Service Validate UNI (Tester)'
-		)
-
-IF OBJECT_ID('tempdb..#sv_testers_concat') IS NOT NULL
-	DROP TABLE #sv_testers_concat
-
-SELECT t1.primary_order_item
-	,STUFF((
-			SELECT ', ' + task_assignee
-			FROM #SV_Tester t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-			ORDER BY primary_order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS testers
-INTO #sv_testers_concat
-FROM #SV_Tester t1
-GROUP BY t1.primary_order_item
-
---select * from #SV_Tester
-IF OBJECT_ID('tempdb..#address') IS NOT NULL
-	DROP TABLE #address;
-
-SELECT a.*
-	,row_number() OVER (
-		PARTITION BY primary_order_item ORDER BY primary_order_item
-			,order_item
-		) AS UNI_NO
-	,gfs_a_city.REGION
-	,gfs_a_city.DIVISION
-INTO #address
-FROM (
-	SELECT DISTINCT wrh.primary_order_item
-		,wrh.order_item
-		,pl.onnet_ind
-		,line1_addr
-		,city_name
-		,state_cd
-		,postal_cd
-		,cop.cust_service_id
-	FROM #related_ords wrh
-	INNER JOIN #sou_limit r ON r.srvc_order_unit = wrh.primary_order_item
-		AND r.order_number = wrh.order_number
-	LEFT OUTER JOIN [tbl_CODS_PRODUCT_LOCATION] pl ON pl.serv_order_nbr = wrh.order_item
-	LEFT OUTER JOIN tbl_CODS_DSL_V_Customer_Order_Product cop ON wrh.order_item = cop.serv_order_nbr
-		AND cop.serv_order_active_ind = 'Y'
-	WHERE wrh.prov_product IN (
-			'uni'
-			,'wholesale uni'
-			)
-		AND cop.serv_order_action_typ IN (
-			'install'
-			,'change'
-			)
-		AND pl.endpnt_typ = 'Access A'
-	) a
-LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions_Cities] gfs_a_city ON gfs_a_city.city = a.CITY_NAME
-	AND gfs_a_city.STATE = a.STATE_CD;
-
---select * from #address
-IF OBJECT_ID('tempdb..#srvc_id_2_gfs') IS NOT NULL
-	DROP TABLE #srvc_id_2_gfs;
-
-SELECT DISTINCT primary_order_item
-	,cust_service_id
-	,region
-	,division
-INTO #srvc_id_2_gfs
-FROM #address
-WHERE cust_service_id IS NOT NULL;
-
---select * from #srvc_id_2_gfs
-IF OBJECT_ID('tempdb..#addr_concat') IS NOT NULL
-	DROP TABLE #addr_concat;
-
-SELECT t1.primary_order_item
-	,STUFF((
-			SELECT ', ' + order_item
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no = 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1
-	,STUFF((
-			SELECT ', ' + city_name
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no = 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_City
-	,STUFF((
-			SELECT ', ' + state_cd
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no = 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_ST
-	,STUFF((
-			SELECT ', ' + t2.line1_addr
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no = 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_Addr
-	,STUFF((
-			SELECT ', ' + t2.cust_service_id
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no = 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_ckt_id
-	,STUFF((
-			SELECT ', ' + order_item
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no > 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2
-	,STUFF((
-			SELECT ', ' + city_name
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no > 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_City
-	,STUFF((
-			SELECT ', ' + state_cd
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no > 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_ST
-	,STUFF((
-			SELECT ', ' + line1_addr
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no > 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_Addr
-	,STUFF((
-			SELECT ', ' + t2.cust_service_id
-			FROM #address t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.uni_no > 1
-			ORDER BY order_item
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_ckt_id
-INTO #addr_concat
-FROM #address t1
-GROUP BY t1.primary_order_item
-;
-
-IF OBJECT_ID('tempdb..#const') IS NOT NULL
-	DROP TABLE #const;
-
-SELECT DISTINCT w.srvc_order_unit
-	,ji.ownernt AS Jeop_owner
-	,jc.constraintid
-	,w.OMC_SOU
-	,CASE 
-		WHEN b.friendly_id IS NOT NULL
-			THEN b.masterclassgroup
-		ELSE jc.constrainttype
-		END AS constraint_type
-	,CASE 
-		WHEN b.friendly_id IS NOT NULL
-			THEN b.mastermadate
-		ELSE jc.dateclosed
-		END AS closed_dt
-	,jc.buildsystem
-	,jc.buildsystemid AS constraint_buildsystemid
-	,CASE 
-		WHEN b.friendly_id IS NOT NULL
-			THEN isnull(b.dcd, b.rdcd)
-		ELSE isnull(jc.dcd, jc.rdcd)
-		END AS latest_dcd_ncd
-INTO #const
-FROM #sou_limit w
-INNER JOIN (
-	SELECT DISTINCT [srvc order unit]
-		,constraintid
-		,buildsystemid
-	FROM [tbl_nasd_const2sous] WITH (NOLOCK)
-	) c ON w.srvc_order_unit = c.[srvc order unit]
-LEFT OUTER JOIN pnd.dbo.thenetbuildordercube b WITH (NOLOCK) ON c.buildsystemid = b.FRIENDLY_ID
-LEFT OUTER JOIN [dbo].[Tbl_Storm_jeopconstraints] jc WITH (NOLOCK) ON c.constraintid = jc.constraintid
-LEFT OUTER JOIN [dbo].[tbl_Storm_jeopinfo] ji WITH (NOLOCK) ON jc.jeopid = ji.jeopid;
-
-IF OBJECT_ID('tempdb..#const_concat') IS NOT NULL
-	DROP TABLE #const_concat;
-
-SELECT t1.srvc_order_unit
-	,STUFF((
-			SELECT ', ' + cast(t2.constraintID AS VARCHAR(16))
-			FROM #const t2
-			WHERE t2.srvc_order_unit = t1.srvc_order_unit
-				AND t2.closed_dt IS NULL
-			ORDER BY t2.constraintID
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Constraints
-	,STUFF((
-			SELECT ', ' + t2.Jeop_owner
-			FROM #const t2
-			WHERE t2.srvc_order_unit = t1.srvc_order_unit
-				AND t2.closed_dt IS NULL
-			ORDER BY t2.constraintID
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Constraint_Jeop_Owner
-	,STUFF((
-			SELECT ', ' + t2.constraint_type
-			FROM #const t2
-			WHERE t2.srvc_order_unit = t1.srvc_order_unit
-				AND t2.closed_dt IS NULL
-			ORDER BY t2.constraintID
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS Open_constraint_type
-	,STUFF((
-			SELECT ', ' + t2.buildsystem
-			FROM #const t2
-			WHERE t2.srvc_order_unit = t1.srvc_order_unit
-				AND t2.closed_dt IS NULL
-			ORDER BY t2.constraintID
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Const_buildsystem
-	,STUFF((
-			SELECT ', ' + t2.constraint_buildsystemid
-			FROM #const t2
-			WHERE t2.srvc_order_unit = t1.srvc_order_unit
-				AND t2.closed_dt IS NULL
-			ORDER BY t2.constraintID
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS Open_constraint_buildsystemid
-	,STUFF((
-			SELECT ', ' + convert(VARCHAR(16), t2.latest_dcd_ncd, 101)
-			FROM #const t2
-			WHERE t2.srvc_order_unit = t1.srvc_order_unit
-				AND t2.closed_dt IS NULL
-			ORDER BY t2.constraintID
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Constraint_latest_ncd
-	,STUFF((
-			SELECT ', ' + t2.omc_sou
-			FROM #const t2
-			WHERE t2.srvc_order_unit = t1.srvc_order_unit
-				AND t2.closed_dt IS NULL
-			ORDER BY t2.constraintID
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 2, '') AS Constraint_OMC_SOUs
-	,sum(CASE 
-			WHEN t1.closed_dt IS NULL
-				THEN 1
-			ELSE 0
-			END) AS Open_Const_Count
-INTO #const_concat
-FROM #const t1
-GROUP BY t1.srvc_order_unit;
-
-IF OBJECT_ID('tempdb..#maxNotes') IS NOT NULL
-	DROP TABLE #maxNotes;
-
-SELECT n.[SRVC_ORDER_UNIT]
-	,max(n.[ts]) AS ts
-INTO #maxNotes
-FROM [SA_Staging].[dbo].[tbl_storm_briefnote] n WITH (NOLOCK)
-INNER JOIN #sou_limit r ON r.omc_sou = n.[SRVC_ORDER_UNIT]
-GROUP BY n.[SRVC_ORDER_UNIT]
-
-IF OBJECT_ID('tempdb..#Notes') IS NOT NULL
-	DROP TABLE #Notes;
-
-SELECT n.[SRVC_ORDER_UNIT]
-	,n.[Note]
-INTO #notes
-FROM [tbl_storm_briefnote] n WITH (NOLOCK)
-RIGHT OUTER JOIN #maxnotes m ON n.ts = m.ts
-	AND n.[SRVC_ORDER_UNIT] = m.[SRVC_ORDER_UNIT];
-
-IF OBJECT_ID('tempdb..#offnet_tsk') IS NOT NULL
-	DROP TABLE #offnet_tsk;
-
-SELECT DISTINCT b.*
-	,isnull(g1.dept_name, b.task_assignee) AS Dept
-	,isnull(g1.job_title, b.task_assignee) AS title
-	,isnull(g1.supervisor_name, b.task_assignee) AS Mgr
-INTO #offnet_tsk
-FROM (
-	SELECT a.*
-		,row_number() OVER (
-			PARTITION BY primary_order_item
-			,task_name ORDER BY task_end_date DESC
-			) AS rownum
-	FROM (
-		SELECT DISTINCT w.primary_order_item
-			,w.task_order_item
-			,w.source
-			,w.sales_region
-			,w.operating_region_cd
-			,CASE 
-				WHEN w.source = 'hybrid'
-					THEN 'Hybrid: ' + tsk.task_name
-				WHEN w.source LIKE 'related order%'
-					THEN 'Related: ' + tsk.task_name
-				ELSE tsk.task_name
-				END AS task_name
-			,tsk.task_assignee
-			,tsk.task_end_date
-			,tsk.task_due_date
-			,tsk.task_id
-			,tsk.task_source
-			,CASE 
-				WHEN tsk.cods_task_status = 'COMPLETE'
-					OR tsk.task_derived_status = 'Completed'
-					THEN 1
-				ELSE 0
-				END AS offnet_task_status
-		FROM task_details tsk WITH (NOLOCK)
-		INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.task_sou
-		WHERE w.source_system NOT IN (
-				'eon'
-				,'gc_eon'
-				,'global crossing'
-				,'level 3'
-				,'siebel'
-				,'pipeline'
-				,'red'
-				,'reverse direct de'
-				)
-			AND (
-				tsk.task_start_date IS NOT NULL
-				OR tsk.task_assignee IS NOT NULL
-				)
-			AND tsk.task_name IN (
-				'offnet_create_and_send_order'
-				,'offnet_receive_complete'
-				,'offnet_fe_receive_foc'
-				)
-		
-		UNION
-		
-		SELECT w.primary_order_item
-			,w.task_order_item
-			,w.source
-			,w.sales_region
-			,w.operating_region_cd
-			,CASE 
-				WHEN w.source = 'hyb'
-					THEN 'Hybrid: ' + tsk.task_name
-				WHEN w.source LIKE 'related order%'
-					THEN 'Related: ' + tsk.task_name
-				ELSE tsk.task_name
-				END AS task_name
-			,tsk.performer_name
-			,CASE 
-				WHEN tsk.task_status = 'completed'
-					THEN tsk.task_end_time
-				ELSE NULL
-				END AS task_end_time
-			,tsk.task_end_time
-			,NULL AS task_id
-			,'tbl_workflow_tasks' AS tsk_src
-			,CASE 
-				WHEN task_status = 'completed'
-					THEN 1
-				ELSE 0
-				END AS offnet_task_status
-		FROM tbl_workflow_tasks tsk WITH (NOLOCK)
-		INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.srvc_order_unit
-		
-		WHERE tsk.bpm_process_type = 'OFFNET'
-			AND tsk.task_name IN (
-				'CreateASR'
-				,'InitiateASRManual'
-				,'InitiateASR'
-				,'CaptureFOC'
-				,'FOCNotification'
-				,'Follow Up'
-				)
-		) a
-	) b
-LEFT OUTER JOIN galcapture g1 ON b.task_assignee = g1.nt_login
-WHERE rownum = 1;
-
---select * from #offnet_tsk
-IF OBJECT_ID('tempdb..#offnet_tsk_concat') IS NOT NULL
-	DROP TABLE #offnet_tsk_concat;
-
-SELECT t1.primary_order_item
-	,STUFF((
-			SELECT 'vbcrlf' + t2.task_name
-			FROM #offnet_tsk t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.offnet_task_status = 1
-			ORDER BY t2.task_end_date
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 6, '') AS completed_offnet_tasks
-	,STUFF((
-			SELECT 'vbcrlf' + convert(VARCHAR(10), t2.task_end_date, 101)
-			FROM #offnet_tsk t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.offnet_task_status = 1
-			ORDER BY t2.task_end_date
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 6, '') AS completed_offnet_tasks_dates
-	,STUFF((
-			SELECT 'vbcrlf' + t2.task_name
-			FROM #offnet_tsk t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.offnet_task_status = 0
-			ORDER BY t2.task_due_date
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 6, '') AS pending_offnet_tasks
-	,STUFF((
-			SELECT 'vbcrlf' + isnull(convert(VARCHAR(10), t2.task_due_date, 101), 'No due date')
-			FROM #offnet_tsk t2
-			WHERE t2.primary_order_item = t1.primary_order_item
-				AND t2.offnet_task_status = 0
-			ORDER BY t2.task_due_date
-			FOR XML PATH('')
-				,TYPE
-			).value('.', 'varchar(max)'), 1, 6, '') AS pending_offnet_tasks_due
-INTO #offnet_tsk_concat
-FROM #offnet_tsk t1
-GROUP BY t1.primary_order_item
-
-IF OBJECT_ID('tempdb..#details') IS NOT NULL
-	DROP TABLE #details;
-
-SELECT td.primary_order_item AS srvc_order_unit
-	,td.task_order_item AS task_sou
-	,td.task_name
-	,td.task_assignee
-	,td.task_due_date
-	,td.task_start_time
-	,td.task_end_time
-	,td.work_site_location
-	,td.source
-	,td.task_status
-	,cast(td.task_id AS VARCHAR(64)) AS task_id
-	,coalesce(CASE 
-			WHEN gfs.region = 'not found'
-				AND city.region IS NOT NULL
-				THEN city.region
-			WHEN addr.uni_2_city IS NULL
-				THEN coalesce(gfs.region, city.region, gfs_a_city.region)
-			ELSE isnull(gfs.region, city.region)
-			END, sid_gfs.region, 'Unknown') AS region --UPDATE 006
-	,coalesce(CASE 
-			WHEN gfs.division = 'not found'
-				AND city.division IS NOT NULL
-				THEN city.division
-			WHEN addr.uni_2_city IS NULL
-				THEN coalesce(gfs.division, city.division, gfs_a_city.division)
-			ELSE isnull(gfs.division, city.division)
-			END, sid_gfs.division, 'Unknown') AS division --UPDATE 006
-	--,coalesce(g.gfs_market, upper(x.market), tech_div.market) AS market
-	,coalesce(g.gfs_market, tech_div.market) AS market
-	,cwj.jeopardy_reason_cd
-	,cwj.short_description
-	,cwj.raised_by_performer_name
-	,cwj.jeopardy_raised_dt
-	,cwj.jeopardy_resolution_dt
-	,dbo.fn_getbusinessdaysnohol(cwj.jeopardy_raised_dt, dbo.trunc(getdate())) AS Jeop_age_BD
-	,cwj.resolved_by_performer_name
-	,replace(replace(replace(notes.[Note], CHAR(13), ' '), CHAR(10), ' '), CHAR(9), ' ') AS Last_Brief_Note
-	,sl.mrr
-	,sl.cust_commit_dt
-	,sl.product_instance_id
-	,sl.source_system
-	,sl.product_family_name
-	,sl.net_ind
-	,sl.business_org_name
-	,sl.cust_req_dt
-	,sl.ccm
-	,sl.CCMMngr
-	,sl.omc_sou
-	,sl.functional_group
-	,sl.provmngr
-	,sl.orig_cust_commit_dt_rpt
-	,sl.bandwidth
-	,sl.order_number
-	,sl.tester
-	,sl.sales_region
-	,sl.operating_region_cd
-	,cc.open_constraint_jeop_owner
-	,cc.open_constraints
-	,cc.open_constraint_type
-	,cc.open_const_buildsystem
-	,cc.open_constraint_buildsystemid
-	,cc.Open_Constraint_latest_ncd
-	,cc.Constraint_OMC_SOUs
-	,cc.Open_Const_Count
-	,addr.UNI_1
-	,addr.UNI_1_City
-	,addr.UNI_1_ST
-	,addr.UNI_1_Addr
-	,addr.UNI_1_ckt_id
-	,addr.UNI_2
-	,addr.UNI_2_City
-	,addr.UNI_2_ST
-	,addr.UNI_2_Addr
-	,addr.UNI_2_ckt_id
-	,test.testers AS order_testers
-INTO #details
-FROM #task_details_join td 
-LEFT OUTER JOIN #sou_limit sl ON td.primary_order_item = sl.srvc_order_unit
-LEFT OUTER JOIN (
-	SELECT right(nt_login, len(nt_login) - charindex('\', nt_login)) AS user_nt
-		,period
-		,loc_city
-		,loc_state
-	FROM [dbo].[GAL_Historical_Hierarchy] WITH (NOLOCK)
-	WHERE dbo.fn_displaymonth(period) = dbo.fn_displaymonth(getdate())
-	) eh ON td.task_assignee = eh.user_nt
-LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions_Cities] city ON city.city = eh.loc_city
-	AND city.STATE = eh.loc_state
-LEFT OUTER JOIN #sel_jeop sj WITH (NOLOCK) ON td.task_id = sj.task_id
-	AND sj.jeop__order = 1
-LEFT OUTER JOIN [CODS_Workflow__Jeopardy] cwj WITH (NOLOCK) ON td.task_id = cwj.task_id
-	AND sj.jeopardy_nid = cwj.jeopardy_nid
-	AND sj.jeop__order = 1
-LEFT OUTER JOIN #notes notes ON sl.omc_sou = notes.[SRVC_ORDER_UNIT]
-LEFT OUTER JOIN #const_concat cc ON cc.srvc_order_unit = td.primary_order_item
-LEFT OUTER JOIN #addr_concat addr ON td.primary_order_item = addr.primary_order_item
-LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions_Cities] gfs_a_city ON gfs_a_city.city = addr.uni_1_city
-	AND gfs_a_city.STATE = addr.uni_1_st
-LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions] gfs ON gfs.CLLI = isnull(td.work_site_location, left(td.dispatch_gateway_clli, 8))
-LEFT OUTER JOIN #sv_testers_concat test ON test.primary_order_item = td.primary_order_item
-LEFT OUTER JOIN #srvc_id_2_gfs sid_gfs ON sid_gfs.primary_order_item = td.primary_order_item
-	AND sid_gfs.CUST_SERVICE_ID = td.service_id
-LEFT OUTER JOIN [tbl_gfs_site_mapping_2013] g WITH (NOLOCK) ON isnull(td.work_site_location, left(td.dispatch_gateway_clli, 8)) = g.clli_cd
---LEFT OUTER JOIN pnd.dbo.xref_Planner_CLLIs x ON isnull(td.work_site_location, left(td.dispatch_gateway_clli, 8)) = x.building_clli
-LEFT OUTER JOIN pnd.dbo.xref_GFS_Tech_Division tech_div ON td.task_assignee = tech_div.nt_login
-
---select * from #details
-IF OBJECT_ID('tempdb..#CEA_CUR') IS NOT NULL
-	DROP TABLE #CEA_CUR;
-
-SELECT cea.*
-	,CASE 
-		WHEN cea.VALUE = 1
-			THEN 'Y'
-		ELSE 'N'
-		END 'CEA Ind'
-INTO #CEA_CUR
-FROM tbl_SONData_CustomerEarlyAcceptance cea WITH (NOLOCK)
-INNER JOIN (
-	SELECT SRVC_ORDER_UNIT
-		,ORDER_NUMBER
-		,max(PK_ID) max_PK_ID
-	FROM tbl_SONData_CustomerEarlyAcceptance cea WITH (NOLOCK)
-	GROUP BY SRVC_ORDER_UNIT
-		,ORDER_NUMBER
-	) max ON cea.PK_ID = max.max_PK_ID;
-	;
-
-IF OBJECT_ID('tempdb..#CEADT') IS NOT NULL
-	DROP TABLE #CEADT;
-
-SELECT ceadt.*
-INTO #CEADT
-FROM tbl_SONData_CEADate ceadt WITH (NOLOCK)
-INNER JOIN (
-	SELECT SRVC_ORDER_UNIT
-		,ORDER_NUMBER
-		,max(PK_ID) max_PK_ID
-	FROM tbl_SONData_CEADate WITH (NOLOCK)
-	GROUP BY SRVC_ORDER_UNIT
-		,ORDER_NUMBER
-	) max ON ceadt.PK_ID = max.max_PK_ID;
-	;
-
-IF OBJECT_ID('tempdb..#CEA_MSTR') IS NOT NULL
-	DROP TABLE #CEA_MSTR;
-
-SELECT cea_cur.PK_ID CEA_PK_ID
-	,cea_cur.SRVC_ORDER_UNIT CEA_SOU
-	,cea_cur.ORDER_NUMBER CEA_ORDER_NUMBER
-	,cea_cur.UPDATED_BY_LOGIN CEA_UPDT_LOGIN
-	,cea_cur.TIMESTAMP CEA_TIMESTAMP
-	,cea_cur.[CEA Ind] CEA_Ind
-	,ceadt.pk_id CEADT_PK_ID
-	,ceadt.updated_by_login CEADT_UPDT_LOGIN
-	,ceadt.TIMESTAMP CEADT_TIMESTAMP
-	,ceadt.value CEADT_EARLY_DT
-	,primary_order_item
-	,wrh.order_number
-INTO #CEA_MSTR
-FROM #CEA_CUR cea_cur
-INNER JOIN #related_ords wrh ON wrh.order_item = cea_cur.SRVC_ORDER_UNIT
-	AND (
-		wrh.order_number = cea_cur.order_number
-		OR wrh.OMC_service_order = cea_cur.order_number
-		)
-LEFT OUTER JOIN #CEADT ceadt ON cea_cur.SRVC_ORDER_UNIT = ceadt.SRVC_ORDER_UNIT
-	AND cea_cur.ORDER_NUMBER = ceadt.ORDER_NUMBER
-WHERE cea_cur.[CEA Ind] = 'y'
-	AND ceadt.value IS NOT NULL
-
-IF OBJECT_ID('tempdb..#CEA') IS NOT NULL
-	DROP TABLE #CEA;
-
-SELECT primary_order_item
-	,CEA_SOU as order_item
-	,max(ceadt_early_dt) AS CEA_DT
-INTO #CEA
-FROM #CEA_MSTR
-GROUP BY primary_order_item, CEA_SOU;
-
-IF OBJECT_ID('tempdb..#max_jeop_notes') IS NOT NULL
-	DROP TABLE #max_jeop_notes
-
-SELECT CASE 
-		WHEN charindex('-', cwn.srvc_order_unit) < 3
-			THEN cwn.srvc_order_unit
-		ELSE LEFT(cwn.SRVC_ORDER_UNIT, charindex('-', cwn.SRVC_ORDER_UNIT) - 1)
-		END AS order_item
-	,task_id
-	,max(note_dt) max_note_dt
-INTO #max_jeop_notes
-FROM CODS_Workflow__Notes cwn
-INNER JOIN #sou_limit w ON w.srvc_order_unit = CASE 
-		WHEN charindex('-', cwn.SRVC_ORDER_UNIT) < 3
-			THEN cwn.SRVC_ORDER_UNIT
-		ELSE LEFT(cwn.SRVC_ORDER_UNIT, charindex('-', cwn.SRVC_ORDER_UNIT) - 1)
-		END
-WHERE task_id IS NOT NULL
-GROUP BY CASE 
-		WHEN charindex('-', cwn.srvc_order_unit) < 3
-			THEN cwn.SRVC_ORDER_UNIT
-		ELSE LEFT(cwn.srvc_order_unit, charindex('-', cwn.srvc_order_unit) - 1)
-		END
-	,task_id;
-
-IF OBJECT_ID('tempdb..#task_note') IS NOT NULL
-	DROP TABLE #task_note
-
+truncate table #tbl_ic_offnet_dashboard_cfa_dos_tasks
+insert into #tbl_ic_offnet_dashboard_cfa_dos_tasks 
 SELECT DISTINCT
-	MJN.order_item
-	,cwn.note_dt
-	,cwn.task_id
-	,cwn.NOTE_TEXT
-	,cwn.USER_NAME
-INTO #task_note
-FROM CODS_Workflow__Notes cwn WITH (NOLOCK)
-INNER JOIN #max_jeop_notes MJN ON MJN.TASK_ID = CWN.TASK_ID
-	AND CWN.NOTE_DT = MJN.max_note_dt;
+	  Td.Customer_Order_Number AS Customer_Order_Id
+	, Td.Task_Sou AS Service_Order_Id
+	, Td.Process_Nid
+	, Td.Task_Nid
+	, Td.Task_Assignee AS Performer_Name
+	, Td.Task_Name
+	, Td.Cods_Task_Status AS Task_Status
+	, Td.Task_Start_Date AS Task_Start_Time
+	, Td.Task_End_Date AS Task_End_Time
+	, Td.Customer_Order_Source AS Source_System
+	, MAX(Co.So_Service_Id) AS So_Service_Id
+	, Td.Process_Id
+	, Td.Task_Id
+	, Cop.Bandwdth_Cd
+	, Cop.Sub_Bandwdth_Cd
+	, Td.Task_Source
+	  FROM Dbo.Task_Details AS Td
+		  LEFT OUTER JOIN Dbo.Cods_Workflow__Customer_Order AS Co
+			  ON Td.Task_Sou = Co.Service_Order_Id
+		  LEFT OUTER JOIN Dbo.Tbl_Cods_Dsl_V_Customer_Order_Product AS Cop
+			  ON Td.Task_Sou = Cop.Serv_Order_Nbr
+WHERE Td.Task_Name IN('DesignOffnetSegment'
+					    , 'Design Offnet Segment'
+					    , 'Identify Interconnect Provider'
+					    , 'Identify_Offnet_Details_GT'
+					    , 'Process Offnet'
+					    , 'Evaluate Cancel'
+						,'Off-Net Design CFA Template','Off-Net Design CFA Template - SUP','Get Carrier VLAN and NNI Details','Offnet Manual Design Template',
+'Offnet Manual Design Template - SUP','NEWCFA Request - Adhoc','Gather costing details')
+		  AND Td.Task_Start_Date >= GETDATE() - 730
+		  AND Td.Cods_Task_Status <> 'I_SUSPENDED'
+		  AND Td.Customer_Order_Source IN('SIEBEL', 'PIPELINE', 'SWIFT', 'SWIFT (BPM)', 'EON', 'ASRI', 'CPO','N/A')
+		  and 1 = case when td.task_source = 'Flight Deck' 
+			  then case when source_task_status in ('Completed','Complete')
+			  then 1 else 0 end
+			  else 1 end
+AND Td.Task_Source in ('BPM', 'ASRI','Flight Deck')
+	  GROUP BY Td.Customer_Order_Number
+		    , Td.Task_Sou
+		    , Td.Process_Nid
+		    , Td.Task_Nid
+		    , Td.Task_Assignee
+		    , Td.Task_Name
+		    , Td.Cods_Task_Status
+		    , Td.Task_Start_Date
+		    , Td.Task_End_Date
+		    , Td.Task_Assignee
+		    , Td.Customer_Order_Source
+		    , Td.Task_Source
+		    , Td.Process_Id
+		    , Td.Task_Id
+		    , Cop.Bandwdth_Cd
+		    , Cop.Sub_Bandwdth_Cd;
 
-IF OBJECT_ID('tempdb..#PROV') IS NOT NULL
-	DROP TABLE #PROV;
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-SELECT p.srvc_order_unit
-	,epi.order_item
-	,s.[service_order]
-	,s.prov_product
-	,s.srvc_order_unit AS omc_srvc_order_unit
-	,'Access Circuit ' + s.srvc_order_unit + CASE 
-		WHEN s.installed_dt IS NOT NULL
-			THEN ' Installed'
-		ELSE ' In Progress'
-		END AS Access
-	--,CASE WHEN p.source_system in ('swift','SWIFT (BPM)') THEN SP.prov_loginID ELSE  sop.prov_loginID END AS prov_loginID
-	--,CASE WHEN p.source_system in ('swift','SWIFT (BPM)') THEN SP.Provisioner_Manager ELSE gm.[NT_LOGIN] END AS PROV_MGR
-	,sop.prov_loginID AS prov_loginID
-	,gm.[NT_LOGIN] AS PROV_MGR
-INTO #PROV
-FROM #sou_limit p WITH (NOLOCK)
-LEFT OUTER JOIN tbl_EON_Primary_Items epi WITH (NOLOCK) ON p.srvc_order_unit = epi.primary_order_item --*****issue is here
-LEFT OUTER JOIN tbl_storm_orders s WITH (NOLOCK) ON isnull(epi.order_item, p.srvc_order_unit) = s.service_order
-LEFT OUTER JOIN Tbl_Storm_OrderProvisioner sop WITH (NOLOCK) ON s.srvc_order_unit = sop.srvc_order_unit
-LEFT OUTER JOIN GALCapture g WITH (NOLOCK) ON sop.prov_loginID = g.[NT_LOGIN]
-	AND g.nt_login IS NOT NULL
-LEFT OUTER JOIN GALCapture GM WITH (NOLOCK) ON G.[SUPERVISOR_NAME] = GM.[FULL_NAME]
-	AND gm.nt_login IS NOT NULL
---LEFT JOIN(select p.prov_loginID, t.Provisioner_Manager, t.OMC_SOU
---from tbl_OMC_Assignments t
---inner join related_order_items r on t.OMC_SOU = r.primary_order_item
---inner join Tbl_Storm_OrderProvisioner p on r.order_item = p.srvc_order_unit ) SP on SP.OMC_SOU = p.srvc_order_unit
-WHERE (	p.source_system = 'gc_eon' AND s.prov_product LIKE '%access circuit%')
-	OR (p.source_system = 'pipeline' AND s.circuit_status = 'access')
-	OR (p.source_system IN ('siebel','cpo','swift','SWIFT (BPM)')
-);
+truncate table #tbl_ic_offnet_dashboard_cfa_jeops_from_cods;
+insert into #tbl_ic_offnet_dashboard_cfa_jeops_from_cods
+SELECT DISTINCT
+	  Td.Customer_Order_Number AS Customer_Order_Id
+	, Td.Task_Sou AS Service_Order_Id
+	, Td.Process_Nid
+	, Td.Task_Nid
+	, Tj.Reason_Code AS Jeopardy_Reason_Code
+	, Tj.Raised_Date AS Jeopardy_Raised_Date
+	, Tj.Created_By AS Raised_By_Performer_Name
+	, isnull(Tj.Resolution_Date,GETDATE()) AS Jeop_Resolution_Date
+	, CASE
+		 WHEN Tj.Resolution_Date IS NOT NULL
+		 THEN 'Y'
+		 ELSE 'N'
+	  END AS Jeopardy_Resolved_Ind
+	, Tj.Resolved_By AS Resolved_By_Performer_Name
+	, Td.Process_Id
+	, Td.Task_Id
+	, Td.Task_Source
+	  FROM Dbo.Task_Details AS Td
+		  INNER JOIN Dbo.Task_Jeopardy_Codes AS Tj
+			  ON Td.Task_Id = Tj.Task_Id
+	  WHERE(Td.Task_Name IN ('DesignOffnetSegment'
+					    , 'Design Offnet Segment'
+					    , 'Identify Interconnect Provider'
+					    , 'Identify_Offnet_Details_GT'
+					    , 'Evaluate Cancel'
+						,'Off-Net Design CFA Template','Off-Net Design CFA Template - SUP','Get Carrier VLAN and NNI Details','Offnet Manual Design Template',
+'Offnet Manual Design Template - SUP', 'NEWCFA Request - Adhoc','Gather costing details')
+		   OR Td.Task_Name LIKE '%Process Off%')
+	and 1 = case when td.task_source = 'Flight Deck' 
+			  then case when source_task_status in ('Completed','Complete') 
+			  then 1 else 0 end
+			  else 1 end
+		  AND Td.Task_End_Date >= GETDATE() - 400;
 
--------------------------------------------TABLE INSERT------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+truncate table #Tbl_Ic_Offnet_Assign_Cfa_New 
+INSERT INTO #Tbl_Ic_Offnet_Assign_Cfa_New
+	  SELECT DISTINCT
+		    C.*
+		  , Intvl_Bus_Hrs - Jeop_Intvl AS Adjusted_Intvl
+		  , CASE
+			   WHEN Intvl_Bus_Hrs - Jeop_Intvl <= 8
+			   THEN 1
+			   ELSE 0
+		    END AS Adjusted_Intvl_Sla_Met
+		  , So_Service_Id AS Inventory_Design_Id
+		  , Service_Order_Id AS Srvc_Order_Unit
+		  , NULL AS Net_Bus_Minutes
+		  , NULL AS Bus_Minutes_Sla_Met_Int
+		  , NULL AS Bus_Minutes_Sla_Met
+		  , NULL AS Bus_Minutes_Sla_Met_Nojeopexcluded_Int
+		  , NULL AS Bus_Minutes_Sla_Met_Nojeopexcluded
+		  , NULL AS Net_Bus_Minutes_Nojeoptimeexcluded
+		    FROM
+			( SELECT A.Customer_Order_Id
+					, A.Service_Order_Id
+					, Performer_Name
+					, Task_Start_Time
+					, Task_End_Time
+					, Intvl_Bus_Hrs
+					, CASE
+						 WHEN Intvl_Bus_Hrs <= 8
+						 THEN 1
+						 ELSE 0
+					  END AS Sla_Met
+					, A.Data_Src_Cd 
+					, MIN(DATEADD(Hh, -7, Jeopardy_Raised_Dt)) AS Min_Jeop_Open
+					, MAX(DATEADD(Hh, -7, Jeopardy_Resolution_Dt)) AS Max_Jeop_Close
+					, isnull(Dbo.Fn_Calcbusinesshours(MIN(DATEADD(Hh, -7, Jeopardy_Raised_Dt))
+					, CASE
+						WHEN MAX(DATEADD(Hh, -7, Jeopardy_Resolution_Dt)) > Task_End_Time
+						THEN Task_End_Time
+						ELSE MAX(DATEADD(Hh, -7, Jeopardy_Resolution_Dt))
+					 END), 0) AS Jeop_Intvl
+					, A.Process_Nid
+					, A.Task_Nid
+					, A.Task_Name
+					, So_Service_Id
+					,A.Task_Id
+					  FROM( SELECT DISTINCT
+								case when T.Source_System = 'N/A' then 'Flight Deck' else T.Source_System end AS Data_Src_Cd
+							   , Process_Nid
+							   , Task_Nid
+							   , Process_Id
+							   , Task_Id
+							   , T.Customer_Order_Id
+							   , T.Service_Order_Id
+							   , T.So_Service_Id
+							   , T.Performer_Name
+							   , Task_Name
+							   , DATEADD(Hh, -7, T.Task_Start_Time) AS Task_Start_Time
+							   , DATEADD(Hh, -7, T.Task_End_Time) AS Task_End_Time
+							   , Dbo.Fn_Calcbusinesshours(DATEADD(Hh, -7, T.Task_Start_Time), DATEADD(Hh, -7, T.Task_End_Time)) AS Intvl_Bus_Hrs
+								FROM #Tbl_Ic_Offnet_Dashboard_Cfa_Dos_Tasks AS T WITH (Nolock)
+			 
+						) AS A 
+						 LEFT OUTER JOIN  #Tbl_Ic_Offnet_Dashboard_Cfa_Jeops_From_Cods AS J 
+							 ON A.Process_Id = J.Process_Id
+							    AND A.Task_Id = J.Task_Id
+								and J.jeopardy_resolution_dt > A.Task_Start_Time
+					  GROUP BY A.Customer_Order_Id
+						    , A.Service_Order_Id
+						    , Performer_Name
+						    , Task_Name
+						    , Task_Start_Time
+						    , Task_End_Time
+						    , Intvl_Bus_Hrs
+						    , A.Data_Src_Cd
+						    , A.Task_Name
+						    , A.Process_Nid
+						    , A.Task_Nid
+						    , So_Service_Id 
+							,A.Task_Id
+			) AS C
 
-INSERT INTO report.gfs_waves_tasks_details
-	(srvc_order_unit
-	,omc_sou
-	,functional_group
-	,ccmmngr
-	,provmngr
-	,tester
-	,business_org_name
-	,cust_req_dt
-	,bandwidth_grp
-	,acity
-	,ast
-	,zcity
-	,zst
-	,last_brief_note
-	,task_name
-	,task_status
-	,task_start_time
-	,task_end_time
-	,task_due_date
-	,performer_name
-	,work_site_location
-	,task_id
-	,task_due_status
-	,gfs_market
-	,gfs_division
-	,gfs_region
-	,jeop_owner
-	,open_constraints
-	,constraint_omc_sous
-	,constraint_types
-	,constraint_buildsystems
-	,constraint_buildsystemids
-	,open_const_count
-	,const_max_latest_dcd
-	,jeopardy_reason_cd
-	,short_description
-	,raised_by_performer_name
-	,jeopardy_raised_dt
-	,jeopardy_resolution_dt
-	,resolved_by_performer_name
-	,task_note_date
-	,task_note_text
-	,note_user_name
-	,cust_early_accept_dt
-	,provisioner
-	,prov_mgr
-	,mrr
-	,product_family_name
-	,orig_cust_commit_dt_rpt
-	,cust_commit_dt
-	,completed_dt
-	,report_date
-	,sales_region
-	,operating_region
-	,bu_short
-	,bu_segment)
+;WITH cte AS (
+    SELECT 
+        td.taskid,
+        sh.status,
+        sh.ActivitySource,
+        sh.CreatedDttm,
+        LAG(status) OVER (PARTITION BY taskid ORDER BY CreatedDttm) AS prev_status,
+        LAG(CreatedDttm) OVER (PARTITION BY taskid ORDER BY CreatedDttm) AS prev_CreatedDttm
+    FROM staging.Flightdeck_TaskStatusHist sh
+    INNER JOIN staging.FlightdeckTaskAttributeDetail td
+        ON sh.task_instance_id = td.ID
+    WHERE sh.WorkgroupName = 'NA Offnet ETH CFA Design'	  
+),
+flagged AS (
+    SELECT
+        *,
+        CASE 
+            WHEN status <> 'Completed' AND prev_status = 'Completed' THEN 1 
+            ELSE 0 
+        END AS Post_Completed_Transition_Flag
+    FROM cte
+)
+,final as (SELECT
+    taskid,
+    status,
+    prev_status,
+    ActivitySource,
+    CreatedDttm,
+	prev_CreatedDttm,
+    Post_Completed_Transition_Flag,
+    SUM(Post_Completed_Transition_Flag) 
+        OVER (PARTITION BY taskid )
+		--ORDER BY CreatedDttm) 
+--              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        AS Post_Completed_Transition_Total
+FROM flagged
+where Post_Completed_Transition_Flag = 1  
+)
+				
+--Update Business Minute fields
+UPDATE ic
+	  SET
+		 Net_Bus_Minutes = Dbo.Fn_Net_Business_Minutes_Intvl(Task_Start_Time, Task_End_Time, Min_Jeop_Open, Max_Jeop_Close)  
+							-x.Prev_Minutes,
 
-	select DISTINCT
-	d.srvc_order_unit as srvc_order_unit
-	,d.omc_sou
-	,d.functional_group
-	,d.ccmmngr
-	,lower(d.provmngr) as provmngr
-	,lower(d.tester) as tester
-	,d.business_org_name
-	,d.cust_req_dt
-	,d.bandwidth as bandwidth_grp
-	,case when v.acity is null then k.aclli else v.acity end as acity
-	,case when v.ast is null then 'SWIFT' else v.ast end as ast
-	,case when v.zcity is null then k.zclli else v.zcity end as zcity
-	,case when v.zst is null then 'SWIFT' else v.zst end as zst
-	,d.last_brief_note
-	,d.task_name
-	,d.task_status
-	,d.task_start_time
-	,d.task_end_time
-	,d.task_due_date
-	,d.task_assignee as performer_name
-	,d.work_site_location
-	,d.task_id
-	,case 
-		when dbo.trunc(d.task_end_time) is not null and dbo.trunc(d.task_due_date) is not null
-			and dbo.trunc(d.task_end_time) <= dbo.trunc(d.task_due_date) 
-				then 'Due Date MET'
-		when dbo.trunc(d.task_end_time) is not null and dbo.trunc(d.task_due_date) is not null
-			and dbo.trunc(d.task_end_time) > dbo.trunc(d.task_due_date) 
-				then 'Due Date MISSED'
-		when dbo.trunc(d.task_end_time) is null and dbo.trunc(k.[completed dt]) is not null and dbo.trunc(d.task_due_date) is not null
-				THEN 'Task End Date MISSING'
-		when dbo.trunc(isnull(d.task_due_date, d.task_end_time)) < @p_hist_dt 
-				then 'Past Due'
-		when dbo.trunc(isnull(d.task_due_date, d.task_end_time)) = @p_hist_dt 
-				then 'Due Today'
-		when dbo.trunc(isnull(d.task_due_date, d.task_end_time)) > @p_hist_dt 
-				then 'Due Later'
-		else 'Verify Due Date'
-		end as task_due_status
-	,d.market as gfs_market
-	,d.division as gfs_division
-	,d.region as gfs_region
-	,d.open_constraint_jeop_owner as jeop_owner
-	,d.open_constraints
-	,d.constraint_omc_sous
-	,d.open_constraint_type as constraint_types
-	,d.open_const_buildsystem as constraint_buildsystems
-	,d.open_constraint_buildsystemid as constraint_buildsystemids
-	,d.open_const_count
-	,d.open_constraint_latest_ncd as const_max_latest_dcd
-	,d.jeopardy_reason_cd as jeopardy_reason_cd
-	,d.short_description as short_description
-	,d.raised_by_performer_name as raised_by_performer_name
-	,d.jeopardy_raised_dt as jeopardy_raised_dt
-	,d.jeopardy_resolution_dt as jeopardy_resolution_dt
-	,d.resolved_by_performer_name as resolved_by_performer_name
-	,cwn.note_dt as task_note_date
-	,replace(replace(replace(cwn.note_text, char(13), ' '), char(10), ' '), char(9), ' ') as task_note_text
-	,cwn.user_name as note_user_name
-	,cea.cea_dt as cust_early_accept_dt
-	,lower(p.prov_loginid) as provisioner
-	,lower(p_mgr.prov_mgr) as prov_mgr
-	--,CASE WHEN SOU.source_system in ('swift', 'SWIFT (BPM)') THEN p.prov_loginID ELSE lower(p.prov_loginID) END AS provisioner
-	--,CASE WHEN SOU.source_system in ('swift', 'SWIFT (BPM)') THEN p.PROV_MGR ELSE lower(p_mgr.PROV_MGR) END AS prov_mgr
-	,d.mrr as mrr
-	,d.product_family_name as product_family_name
-	,d.orig_cust_commit_dt_rpt as orig_cust_commit_dt_rpt
-	,d.cust_commit_dt as cust_commit_dt
-	,k.[completed dt] as completed_dt
-	,@p_hist_dt as report_date
-	,d.sales_region
-	,d.operating_region_cd as operating_region
-	,s.BU_SHORT
-	,s.bu_segment
-FROM #details d
-LEFT OUTER JOIN #offnet_tsk_concat ot ON d.srvc_order_unit = ot.primary_order_item
-LEFT OUTER JOIN #CEA cea ON d.srvc_order_unit = cea.order_item
-LEFT OUTER JOIN #task_note cwn WITH (NOLOCK) ON d.task_id = cast(cwn.task_id AS VARCHAR(64))
-LEFT OUTER JOIN [V_PROV_ORDER_ALL] v WITH (NOLOCK) ON d.srvc_order_unit = v.[SRVC_ORDER_UNIT]
-LEFT OUTER JOIN [k_mart_data_daily] k WITH (NOLOCK) ON d.srvc_order_unit = k.[srvc order unit]
-LEFT OUTER JOIN [Dbo].[TBL_SFDC_ACCOUNT] s WITH (NOLOCK) ON k.ULTIMATE_CUST_ID=s.Ultimate_Cust_Num
-LEFT OUTER JOIN #prov p on p.srvc_order_unit = d.srvc_order_unit
-LEFT OUTER JOIN #prov p_mgr on p_mgr.srvc_order_unit = d.srvc_order_unit
---LEFT OUTER JOIN #sou_limit SOU on SOU.srvc_order_unit = p.srvc_order_unit
---LEFT OUTER JOIN tbl_k_mart_daily_w_metasolv_and_latam ml on d.task_sou = ml.[srvc order unit]
+		Net_Bus_Minutes_Nojeoptimeexcluded = Dbo.Fn_Net_Business_Minutes_Intvl(Task_Start_Time, Task_End_Time, NULL, NULL)
+												- x.Prev_Minutes
+		 from #Tbl_Ic_Offnet_Assign_Cfa_New ic left join final f
+		 on ic.task_id = f.taskid
+		 Cross Apply (
+		 select ISNULL(Dbo.Fn_Net_Business_Minutes_Intvl(prev_CreatedDttm,CreatedDttm, null, null),0) as Prev_Minutes
+		 )X
+		 ;
 
+UPDATE #Tbl_Ic_Offnet_Assign_Cfa_New
+	  SET
 
+	  	 Bus_Minutes_Sla_Met_Int = CASE
+								 WHEN Net_Bus_Minutes <= 1440
+								 THEN 1
+								 ELSE 0
+							  END,
+		 Bus_Minutes_Sla_Met = CASE
+							  WHEN Net_Bus_Minutes <= 1440
+							  THEN 'Made'
+							  ELSE 'Missed'
+						   END,
+		 Bus_Minutes_Sla_Met_Nojeopexcluded_Int = CASE
+											 WHEN Net_Bus_Minutes_Nojeoptimeexcluded <= 1440
+											 THEN 1
+											 ELSE 0
+										  END,
+		 Bus_Minutes_Sla_Met_Nojeopexcluded = CASE
+										  WHEN Net_Bus_Minutes_Nojeoptimeexcluded <= 1440
+										  THEN 'Made'
+										  ELSE 'Missed'
+									   END;
 
+EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 2',1;
+EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 3',0;
 
---STORED PROCEDURE BODY END
-
-EXEC dbo.sp_jv_update 'report_gfs_waves_tasks_details update', 1 
-
-
-END TRY
-
--------------------------------------
--- Catch Any Errors - Log Job Failure
--------------------------------------
-BEGIN CATCH
-
-    DECLARE @ErrorNumber	INT = ERROR_NUMBER();
-    DECLARE @ErrorLine		INT = ERROR_LINE();
-    DECLARE @ErrorMessage	NVARCHAR(4000) = ERROR_MESSAGE();
-    DECLARE @ErrorSeverity	INT = ERROR_SEVERITY();
-    DECLARE @ErrorState		INT = ERROR_STATE();
-	DECLARE @vOutputError	VARCHAR(MAX) = ' Error: Line '+CAST(@ErrorLine AS VARCHAR(10))+' -- '+CAST(@ErrorNumber AS varchar(10))+' - '+@ErrorMessage;
  
-    PRINT 'Actual error number: ' + CAST(@ErrorNumber AS VARCHAR(10));
-    PRINT 'Actual line number: ' + CAST(@ErrorLine AS VARCHAR(10));
-	PRINT 'ERR MSG: '+ CAST(@ErrorMessage AS VARCHAR(4000));
 
-    ------------------
-	--  Error Job   --
-    ------------------
-	EXEC dbo.sp_jv_update	@reportName = @vProcessName
-		    				, @updatetype = 1
-							, @iErrorMessage = @vOutputError;
-  
-    RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
-END CATCH
-					 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--Report Query
 
+declare	@RB datetime =  format(dateadd(MONTH,-13,GETDATE()),'yyyy-MM-01'); 
+declare    @RE datetime = cast(GETDATE() as date);
+DECLARE @Counter INT = 0;
+
+IF OBJECT_ID('tempdb..#t') IS NOT NULL DROP TABLE #t
+create table #t (mon date)
+
+WHILE @Counter <= datediff(day,format(dateadd(MONTH,-13,GETDATE()),'yyyy-MM-01'),getdate())
+BEGIN
+	insert into #t Select  cast(dateadd(day,-@counter,@re) as date) --convert(varchar(7),DATEADD(M,-@Counter,@RE),120)    
+    SET @Counter = @Counter + 1;
+END;
+
+IF OBJECT_ID('tempdb..#List') IS NOT NULL DROP TABLE #List
+Create Table #List
+( Director varchar(100) null,  Manager varchar(100) null, Manager_Full_Name varchar(100) null,  NT_Login varchar(100) null, NT_Login_Full_Name varchar(100) null, 
+Contractor_Flag varchar(100) null, GAL_Contractor_Flag varchar(1) null,  Non_EO_Contractor varchar(100) null)
+Insert Into #List select * from 
+	 (select Director, Manager, Manager_Full_Name, EO as NT_Login, EO_Full_Name as NT_Login_Full_Name,
+Case When os.NT_Login IS Null and Org.contractor_flag = 'n' Then 'OnShore EO' 
+	 When os.NT_Login IS Null and Org.contractor_flag = 'y' Then 'OnShore Contractor' Else os.Contractor 
+	 End Contractor_Flag,
+	Org.Contractor_Flag as GAL_Contractor_Flag, os.NT_Login as Non_EO_Contractor 
+	from dbo.vw_offnet_prov_org org with (nolock) 
+		Left Outer Join dbo.vw_Offshore_Contractors os on EO = OS.NT_Login
+		)a
+
+IF OBJECT_ID('tempdb..#bom') IS NOT NULL DROP TABLE #bom
+
+SELECT Customer_Order_Id
+		  , Service_Order_Id
+		  , Srvc_Order_Unit
+		  , Performer_Name
+		  , Task_Nid as bom_task_nid
+		  , Cfa_Task_Count
+		  , Performer_Cfa_Task_Count
+		  , Cfa_Jeop_Count
+		  , Task_Name as bom_task_name
+		  , Task_Start_Time
+		  , Task_End_Time
+		  , Dbo.Fn_Net_Business_Minutes_Intvl(Task_Start_Time, Task_End_Time, null, null) AS Net_Business_Minutes_Raw
+		  , Intvl_Bus_Hrs
+		  , Sla_Met
+		  , Data_Src_Cd
+		  , Min_Jeop_Open AS Jeop_Start_Time
+		  , Max_Jeop_Close AS Jeop_End_Time
+		  , Adj_Jeop_Close AS Adj_Jeop_End_Time
+		  , Dbo.Fn_Net_Business_Minutes_Intvl(Min_Jeop_Open, Adj_Jeop_Close, NULL, NULL) AS Jeop_Net_Business_Minutes
+		  , Jeop_Intvl
+		  , Adjusted_Intvl
+		  , Adjusted_Intvl_Sla_Met
+		  , Supervisor_Name
+		  , Sla
+		  , Sla_Status
+		  , Adjusted_Intvl_Sla_Status
+		  , Inventory_Design_Id
+		  , Net_Bus_Minutes
+		  , Bus_Minutes_Sla_Met_Int
+		  , Bus_Minutes_Sla_Met
+		  ,Net_Bus_Minutes_NoJeopTimeExcluded
+		  ,Bus_Minutes_SLA_Met_NoJeopExcluded_Int
+		  ,task_id
+		  into #BOM 
+  	      FROM ( SELECT Detail.*
+					, Performer_Cfa_Task_Count
+					, Cfa_Task_Count
+					, Cfa_Jeop_Count
+					, Gc.Supervisor_Name				
+					, '8 Bus Hrs' AS Sla
+					, CASE
+						 WHEN Sla_Met = 1
+						 THEN 'Yes'
+						 ELSE 'No'
+					  END AS Sla_Status
+					, CASE
+						 WHEN Adjusted_Intvl_Sla_Met = 1
+						 THEN 'Yes'
+						 ELSE 'No'
+					  END AS Adjusted_Intvl_Sla_Status
+					, CASE
+						 WHEN Max_Jeop_Close > Task_End_Time
+						 THEN Task_End_Time
+						 ELSE Max_Jeop_Close
+					  END AS Adj_Jeop_Close
+					  FROM( SELECT A.*
+							   , CASE
+								    WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
+								    THEN Customer_Order_Id
+								    ELSE Service_Order_Id
+								END AS Sou_Join
+								FROM #Tbl_Ic_Offnet_Assign_Cfa_New AS A ) AS Detail
+						 LEFT OUTER JOIN Dbo.Galcapture AS Gc
+							 ON Detail.Performer_Name = Gc.Nt_Login
+						 LEFT OUTER JOIN( SELECT CASE
+											    WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
+											    THEN Customer_Order_Id
+											    ELSE Service_Order_Id
+											END AS Sou_Join
+										   , COUNT(*) AS Cfa_Task_Count
+											FROM #Tbl_Ic_Offnet_Assign_Cfa_New AS Detail
+											GROUP BY CASE
+													   WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
+													   THEN Customer_Order_Id
+													   ELSE Service_Order_Id
+												    END ) AS Cfa_Tasks
+							 ON Detail.Sou_Join = Cfa_Tasks.Sou_Join
+						 LEFT OUTER JOIN( SELECT Performer_Name
+										   , CASE
+											    WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
+											    THEN Customer_Order_Id
+											    ELSE Service_Order_Id
+											END AS Sou_Join
+										   , COUNT(*) AS Performer_Cfa_Task_Count
+											FROM #Tbl_Ic_Offnet_Assign_Cfa_New AS Detail
+											GROUP BY Performer_Name
+												  , CASE
+													   WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
+													   THEN Customer_Order_Id
+													   ELSE Service_Order_Id
+												    END ) AS Cfa_Tasks_For_This_Performer
+							 ON Detail.Performer_Name = Cfa_Tasks_For_This_Performer.Performer_Name
+							    AND Detail.Sou_Join = Cfa_Tasks_For_This_Performer.Sou_Join
+						 LEFT OUTER JOIN( SELECT Service_Order_Id
+										   , COUNT(*) AS Cfa_Jeop_Count
+											FROM #Tbl_Ic_Offnet_Dashboard_Cfa_Jeops_From_Cods
+											GROUP BY Service_Order_Id ) AS Cfa_Jeops
+							ON Detail.Service_Order_Id = Cfa_Jeops.Service_Order_Id							  
+				) AS A 
+where dbo.trunc(Task_End_Time) >= @RB and dbo.trunc(Task_End_Time) <= @RE
+
+		    GROUP BY Customer_Order_Id
+				 , Service_Order_Id
+				 , Srvc_Order_Unit
+				 , Performer_Name
+				 , Task_Nid
+				 , Performer_Cfa_Task_Count
+				 , Cfa_Task_Count
+				 , Cfa_Jeop_Count
+				 , Task_Name
+				 , Task_Start_Time
+				 , Task_End_Time
+				 , Intvl_Bus_Hrs
+				 , Sla_Met
+				 , Data_Src_Cd
+				 , Min_Jeop_Open
+				 , Max_Jeop_Close
+				 , Adj_Jeop_Close
+				 , Jeop_Intvl
+				 , Adjusted_Intvl
+				 , Adjusted_Intvl_Sla_Met
+				 , Supervisor_Name
+				 , Sla
+				 , Sla_Status
+				 , Adjusted_Intvl_Sla_Status
+				 , Inventory_Design_Id
+				 , Net_Bus_Minutes
+				 , Bus_Minutes_Sla_Met_Int
+				 , Bus_Minutes_Sla_Met
+				 ,Net_Bus_Minutes_NoJeopTimeExcluded
+				 ,Bus_Minutes_SLA_Met_NoJeopExcluded_Int
+				 ,task_id
+
+
+truncate table report.offnet_ic_metrics
+
+
+insert into report.offnet_ic_metrics 
+--insert into report.offnet_ic_metrics 
+(director, manager, manager_full_name, nt_login, nt_login_full_name, contractor_flag, gal_contractor_flag, non_EO_Contractor,mon,
+customer_order_id, service_order_id, srvc_order_unit, task_assignee, task_nid, cfa_task_count, performer_cfa_task_count, cfa_jeop_count,task_name, task_start_date, task_end_date, 
+net_business_minutes_raw, intvl_bus_hrs, sla_met, data_src_cd, jeop_start_time, Jeop_end_time, Adj_Jeop_end_time, Jeop_net_business_minutes, Jeop_intvl,Adjusted_intvl,
+Adjusted_intvl_sla_met, supervisor_name,sla, sla_status, adjusted_intvl_sla_status, inventory_design_id, net_bus_minutes, bus_minutes_sla_met_int, bus_minutes_sla_met, 
+net_bus_minutes_noJeoptimeexcluded,Bus_Minutes_SLA_Met_NoJeopExcluded_Int,task_id,task_source, business_unit,business_segment)
+
+select list.*,cast(BOM.task_end_time as date),bom.*,case when bom.data_src_cd = 'Flight Deck' then 'Flight Deck' else 'ASRI BPM' end as task_source,
+sfdc.bu_short business_unit, sfdc.bu_segment business_segment 
+from #bom bom 
+left join dbo.galcapture gal on bom.performer_name = gal.NT_LOGIN or bom.performer_name = gal.cuid
+left join #list list on List.NT_Login = gal.NT_LOGIN --bom.performer_name  
+left join dbo.k_mart_data_daily k on bom.SRVC_ORDER_UNIT = k.[srvc order unit]
+left outer join dbo.tbl_sfdc_account sfdc on k.[bus org id] = sfdc.BUS_ORG_ID	
+where list.nt_login is not null
+
+EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 3',1;
 
 END
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
