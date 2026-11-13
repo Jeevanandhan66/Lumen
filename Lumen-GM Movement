@@ -1,567 +1,982 @@
 USE [SA_Staging]
 GO
-/****** Object:  StoredProcedure [report].[usp_OffNet_CFA_IC_Metrics]    Script Date: 11/13/2026 1:45:39 PM ******/
+/****** Object:  StoredProcedure [dbo].[usp_xref_order_assignees]    Script Date: 11/13/2026 3:47:03 PM ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
 
 
---EXEC [report].[usp_OffNet_CFA_IC_Metrics]
 
-/*************************************************************************************************************************************
- Author: Phil Ferlin
- Create date: 11/2/2017
- Description: This stored procedure to support the SSRS Report "OffNet IC Dashboard".  The dataset within the main dashboard .rdl has
-              become too large and had to be converted to a stored procedure call from the report.
 
--------------------------------------------------------------------------------------------------------------------------------------
+
+/*=========================================================================================================================================================
+ Author:		
+ Create date:	
+ Description:	
+ 
  Ver		Date			Author			Desc
- ------------------------------------------------------------------------------------------------------------------------------------
- 1.0        2017-11-02      Phil F			Created Proc
- 1.1		2017-11-14		Phil F			Added new bandwidth parameter and filtering on each section for bandwidth.  BIRA 3,758
- 1.2		2017-11-15		Phil F			Added new subinterval for CSD to ISD.  BIRA 3,787
- 1.3		2017-11-17		Phil F			Added code to exclude specific disconnect activities where there is a corresponding Install 
-											PON on same SWIFT/CPO Order Number
- 1.4		2017-12-02		Phil F			For all Subinterval segments, increased decimal(5,1) to decimal(7,1)
- 1.5		2018-02-05		Phil F			Changed final result set to include Full Name values from the #List temp table
- 1.6		2018-02-07		Phil F			Changed the off-net organization view from vw_paula_lee_org to vw_offnet_prov_org
- 1.7		2018-06-04		Phil F			Performance tuning.  Dashboard has been taking too long to run.
- 1.8		2018-06-20		Phil F			Additional Performance tuning.
- 1.9		2018-08-07		Prasanth		BIRA#4713: Lot of duplicates in snapshot tables due to PON='RED HYBRID'. Removed duplicates using 'distinct'.
- 2.0		2018-08-27		Divya A			BIRA#4557: Fixed srvc order unit match impression to include "/" in Issue ASR Metrics section.
- 2.1        2018-12-18      Deovrat S.      BIRA#4244: Adding FIRST FOC Received to task completion; additions for requests 4666 and 4668 as well.
- 2.2		2019-08-22		Prasanth I.		BIRA#4714: Added 'mon' field to all temp tables involved in the final query. This is to achieve the monthly roll up of data in the report.
- 2.3		2022-10-21		Kirti S			TASK2291681: Added CFA tasks worked in flight Deck
- 2.4		2025-04-21		Madhu			TASK3639736 || As part of BIRA standardization, modified the complete procedure to build the tables as per the new standard PowerBI report
- 2.5		2026-04-22		Madhu			INC7735125 || Included Status change data to eliminate the idle time between completed and restart of the task
-*************************************************************************************************************************************/
+ -----------------------------------------------------------------------------------------------------------------------------------------------------------
+ 2.0		2017-04-08		Abdul Baseer		For Pipeline Supp orders, added script to update latest order number to the Xref assignee table
+ 2.1        2018-01-20      Deovrat S			EON data-pull from CDW, removed bpe eon table references as those are not needed.
+ 2.2		2018-01-24		Prasanth Indira		Used Cast function to typecast Provisioner_id from tbl_Storm_Orders
+ 2.3		2018-03-16		Phil F				BIRA 4233: Removed unnecessary join on order number for CCM Update that was losing hits to Storm Orders table
+ 2.4		2018-04-27		Chad TJ				Put in some code to handle records we get for CHASTAIN.JENNIFER to translate to WILSON.JENNIFER
+ 2.5		2018-06-12		Chad Tj				Added some temporary code updates to update any CUID we get from OMC to the NT Login field value, need to revisit 
+												a more sophisticated solution.
+ 2.6        2018-09-21      Deovrat S           Updates to CCM pulled from OMC
+ 2.7		2018-10-15		Chad Tj				Put in a second join in the OMC CPM section to also try to join on universal id, as it seems OMC is doing both
+												cuid and universal id sometimes.
+ 2.8        2018-10-17		Mary Falcone		Added back in join to stm_orders to pick up system CCM.  This is a temporary fix until KM fixes their logic.  
+                                                When KM is fixed this shoudl be removed.  Also excluded records from storm order assigned that are mapped as not.known CCM
+ 2.9        2018-10-18      Mary Falcone        Added in join to OMC by order number / PIID for those orderes being stored that way
+ 3.0        2018-11-19      Mary Falcone        a) Changed CCM section to add temp table that passes through all possible CCM combos in OMC to choose the right one
+                                                b) Simplified CCM joins to use temp table
+												c) Removed later section updating ccm based on universal id and cuid since this is now done directly in the CCM section
+												d) Added criteria to other universal id/cuid sections to only update if a value is found
+ 3.1		2018			Chad TJ				a) Added some temporary updates until further analysis is done to update 2 orders to null
+ 3.2		2019-03-06		Phil F				BIRA 4943: Implemented patch to accomodate how OMC is storing their assignments for Tester and Provisioner for DIA.  
+												For nulls, they will get populated using a join from storm_orders to order_assignees of 
+												so.order_number + '/' + so.pcid = oa.srvc_order_unit
+ 3.3		2019-06-12		Phil F				Added same patch as done in ver 3.2 (Testor/Provisioner) but for PM_NTLogin
+ 3.4		2019-08-02		Anand				Added update statement to change the order number when 550645505/332761259 to get the offnet provisioner details
+												for BIRA #5743.
+ 3.5		2019-11-21		Anand				Removed the update statement for the SOU 550645505/332761259 and added the related order items in join with the 
+												order assignees table to get the offnet provisioner for the SWIFT/SWIFT (BPM) orders for BIRA #5743
+ 3.6        2020-01-07      Deovrat S           Updates to PM values after it gets cleared from OMC. BIRA 6496
+ 3.7		2020-01-08		Chad Tj				Added new code to capture SDP PMs from a care table until we can ge tthe contacts worked out
+												Also added an archive process to push contacts out of the table into an archive table the 2nd sunday of every month
+ 3.8        2020-01-28      Deovrat S           Adding a few exceptions for PM value updates as these are old orders and are not clearing itself on OMC end. BIRA Request 6433 and 6496
+ 3.9		2020-02-13		CHad TJ				Adding code for SDP to populated the PM if the CPM is a PM.
+ 4.0        2020-03-15      Deovrat S           Adding an exception for PM update for SWIFT DIA related orders: BIRA Request 6743
+ 4.1		2020-06-16		Phil F				6836 for the 2 patches here for dbo.tbl_storm_orderassignees and dbo.tbl_storm_orders
+													 There was a mapping fix done on a go-forward basis in OMC Production Mid April 2020 per Deovrat for CCM assignments.
+													 But there wasn't an update done to current records in StormRT assigned to the wrong James Johnson
+ 4.2        2020-06-24      Deovrat S           Adding updates for PM assignment where values are being set at component level.
+ 4.3		2020-07-28		Phil F				BIRA 7168: CCM Assignment changes
+ 4.4		2020-09-02		Chad Tj				Addded some out of standard code to make sure PM values stay null for certain SDP orders.
+ 4.5		2020-11-19		Andy K				Numerous BIRA requests for PM issues:   Modified SDP section to override incorrect PMs with null for WIP/current month installs.  
+													Also added a check in the CCM to PM to verify that employee is in Active state in galCapture.
+ 4.6        2020-12-08      Deovrat S           Added special_project_flag
+ 4.7		2021-01-04		Andy K				Updated Green SDP section to use cods.order_contacts which replaces the old CAREDM PM source.
+ 4.8        2021-01-25      Andy K				BIRA 7243:  Special fix for older orders (180610154,181380619) to resolve PM mapping issue.
+ 4.9		2021-09-16		Phil F				BIRA 9017:  Corrrected code that handles provisioner in xref_order_assignees with Storm data.
+ 5.0		2022-23-06		Kirti S				Removed kmd.pm_login and coalesce function as per INC4679031
+ 5.1        2023-01-19      Deovrat S           Applying a fix to a scenario where multiple PM contacts are loaded at same time for an order: INC5227585
+ 5.2        2023-01-24      Deovrat S           Additional fix to clear old orders: INC5227585
+ 5.3        2023-09-28      Mounicka R          Applying update statement to pull pm names from CDW as per TASK2638050
+ 5.4		2024-04-25		Andy K				INC6461696: Hard code fix to NULL the PM for an order that is referencing OMC whereas QMV does not have a PM identified.
+ 5.5	    2024-07-23	    Madhu			    INC6566037- Use the Xref logic for BU Segment FED, rest other's, use the PM data flowing from CDW 
+ 5.6		2024-07-23	    Madhu			    INC6566037- Cleanup of unwanted update statements.
+ ============================================================================================================================================================ */
 
-ALTER proc [report].[usp_OffNet_CFA_IC_Metrics]
+ALTER PROCEDURE [dbo].[usp_xref_order_assignees]  @iAgentJob VARCHAR(1000) = NULL
+
+--FOR TESTING: EXEC [dbo].[usp_xref_order_assignees]
+	
 AS
 BEGIN
 
+SET NOCOUNT ON;
 
-EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 1',0;
+      --Declare a variable to handle the agent job NULL and apply the host name running if manual
+	DECLARE @vAgentJob		VARCHAR(1000) = isNull(@iAgentJob,'Manual Run ('+HOST_NAME()+')');
+	DECLARE @vProcessName VARCHAR(100) = 'xref_order_assignees';
 
-IF OBJECT_ID('tempdb..#tbl_ic_offnet_dashboard_cfa_dos_tasks') IS NOT NULL DROP TABLE #tbl_ic_offnet_dashboard_cfa_dos_tasks
-IF OBJECT_ID('tempdb..#tbl_ic_offnet_dashboard_cfa_jeops_from_cods') IS NOT NULL DROP TABLE #tbl_ic_offnet_dashboard_cfa_jeops_from_cods
-IF OBJECT_ID('tempdb..#Tbl_Ic_Offnet_Assign_Cfa_New') IS NOT NULL DROP TABLE #Tbl_Ic_Offnet_Assign_Cfa_New
+	BEGIN TRY
+	--------------------------------------------------------
+	-- Job Validation start / dependencies
+	--------------------------------------------------------
+    EXEC dbo.sp_jv_update @reportName		= @vProcessName
+						, @updatetype		= 0
+						, @source_server	= @@SERVERNAME
+						, @source_job		= @vAgentJob;
 
-CREATE TABLE #tbl_ic_offnet_dashboard_cfa_dos_tasks(
-	[Customer_Order_Id] [varchar](250) NULL,
-	[Service_Order_Id] [varchar](250) NULL,
-	[Process_Nid] [numeric](18, 0) NULL,
-	[Task_Nid] [numeric](22, 0) NOT NULL,
-	[Performer_Name] [varchar](300) NULL,
-	[Task_Name] [varchar](1000) NOT NULL,
-	[Task_Status] [varchar](30) NULL,
-	[Task_Start_Time] [datetime] NULL,
-	[Task_End_Time] [datetime] NULL,
-	[Source_System] [varchar](64) NULL,
-	[So_Service_Id] [varchar](1024) NULL,
-	[Process_Id] [varchar](250) NULL,
-	[Task_Id] [varchar](1000) NULL,
-	[Bandwdth_Cd] [nvarchar](30) NULL,
-	[Sub_Bandwdth_Cd] [nvarchar](30) NULL,
-	[Task_Source] [varchar](100) NULL
-	)
+	
+	
+	-- Force EON prov assignment based on task level data if no assignment was made in OMC
+	-- Create temp physical table for raw EON data
+	if OBJECT_ID('tempdb..#tmp_eon_assignment') is null
+		create table #tmp_eon_assignment
+			(order_item varchar(128)
+			,user_id varchar(64)
+			,nt_login varchar(128)
+			,activity_name varchar(128)
+			,completion_date datetime
+			,pri_task_idx int
+			,assignment_type varchar(4)
+			,id int identity(1,1)
+			)
+		;
+	else
+		truncate table #tmp_eon_assignment
+		;
+	;
 
-CREATE TABLE #tbl_ic_offnet_dashboard_cfa_jeops_from_cods(
-	[customer_order_id] [varchar](250) NULL,
-	[service_order_id] [varchar](100) NULL,
-	[process_nid] [numeric](18, 0) NULL,
-	[task_nid] [numeric](22, 0) NULL,
-	[jeopardy_reason_cd] [varchar](256) NULL,
-	[jeopardy_raised_dt] [datetime] NULL,
-	[raised_by_performer_name] [varchar](256) NULL,
-	[jeopardy_resolution_dt] [datetime] NULL,
-	[jeopardy_resolved_ind] [varchar](1) NULL,
-	[resolved_by_performer_name] [varchar](256) NULL,
-	[process_id] [varchar](250) NULL,
-	[task_id] [varchar](1000) NULL,
-	[task_source] [varchar](100) NULL
-)
+	-- quick fix for employee who's nt login has changed. 
+/*	UPDATE dbo.tbl_storm_orderassignees 
+	set AssignedToNT = 'champion.karen' 
+	where ASSIGNEDTOPERSONID = 192077 
+*/
 
-CREATE TABLE #Tbl_Ic_Offnet_Assign_Cfa_New(
-	[CUSTOMER_ORDER_ID] [varchar](240) NULL,
-	[SERVICE_ORDER_ID] [varchar](240) NULL,
-	[PERFORMER_NAME] [varchar](1024) NULL,
-	[TASK_START_TIME] [datetime] NULL,
-	[TASK_END_TIME] [datetime] NULL,
-	[Intvl_Bus_Hrs] [int] NULL,
-	[SLA_Met] [int] NULL,
-	[Data_Src_Cd] [varchar](100) NULL,
-	[Min_Jeop_Open] [datetime] NULL,
-	[Max_Jeop_Close] [datetime] NULL,
-	[Jeop_Intvl] [int] NULL,
-	[process_NID] [numeric](22, 0) NULL,
-	[task_NID] [numeric](22, 0) NULL,
-	[Task_Name] [varchar](1408) NULL,
-	[so_service_id] [varchar](1000) NULL,
-	[Task_Id] [varchar](1000) NULL,
-	[Adjusted_Intvl] [int] NULL,
-	[Adjusted_Intvl_SLA_Met] [int] NULL,
-	[Inventory_Design_Id] [varchar](100) NULL,
-	[Srvc_Order_Unit] [varchar](100) NULL,
-	[Net_Bus_Minutes] [int] NULL,
-	[Bus_Minutes_SLA_Met_Int] [int] NULL,
-	[Bus_Minutes_SLA_Met] [varchar](100) NULL,
-	[Bus_Minutes_SLA_Met_NoJeopExcluded_Int] [int] NULL,
-	[Bus_Minutes_SLA_Met_NoJeopExcluded] [varchar](100) NULL,
-	[Net_Bus_Minutes_NoJeopTimeExcluded] [int] NULL,
-)
-EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 1',1;
-EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 2',0;
+	-- Gather EON assignments based on the tasks listed. Used row_number() instead of min/maxing due to trump logic
+	insert into #tmp_eon_assignment
+	select
+		 *
+		,'Prov' as assignment_type
+	from
+		(select 
+			 z.order_item
+			,z.user_id
+			,z.nt_login
+			,z.activity_name
+			,z.completion_date
+			,ROW_NUMBER() over (partition by z.order_item order by z.task_trump, z.completion_date desc) as pri_task_idx
+		from
+			(select
+				 a.activity_status_group
+				,a.action_type
+				,a.completion_date
+				,a.order_item
+				,a.user_id
+				,a.user_name
+				,b.nt_login
+				,a.activity_name
+				,a.group_name
+				,case when	a.activity_name in ('Design POP-to-POP','Fix Order: Design POP-to-POP') then 0 else 99 end as task_trump
+			from dbo.tbl_task_durations a
+			inner join dbo.vw_last_employee_instance b on a.user_id = b.gc_userid
+			where a.activity_name in ('Fix Order: Design POP-to-POP','Design POP-to-POP','Move Path Below DS3','Move Path','Fix Order: Move Path Below DS3','Fix Order: Move Path')
+				and a.order_item is not null
+				and a.completion_date between dateadd(month,-1,dbo.trunc(getdate())) and GETDATE()
+			) z
+		) y
+	where	y.pri_task_idx = 1
+	;
+	
+	insert into dbo.xref_order_assignees
+		([Srvc Order Unit]
+		,OMC_SOU
+		,Provisioner
+		,data_src_cd
+		)
+	select
+		 a.order_item
+		,b.OMC_SOU
+		,a.nt_login
+		,'GC_EON'
+	from #tmp_eon_assignment a
+	left outer join dbo.rosetta_stone b on a.order_item = b.SA_Mart_SOU
+	left outer join dbo.xref_order_assignees c on a.order_item = c.[Srvc Order Unit]
+	where c.id is null
+	;
 
-truncate table #tbl_ic_offnet_dashboard_cfa_dos_tasks
-insert into #tbl_ic_offnet_dashboard_cfa_dos_tasks 
-SELECT DISTINCT
-	  Td.Customer_Order_Number AS Customer_Order_Id
-	, Td.Task_Sou AS Service_Order_Id
-	, Td.Process_Nid
-	, Td.Task_Nid
-	, Td.Task_Assignee AS Performer_Name
-	, Td.Task_Name
-	, Td.Cods_Task_Status AS Task_Status
-	, Td.Task_Start_Date AS Task_Start_Time
-	, Td.Task_End_Date AS Task_End_Time
-	, Td.Customer_Order_Source AS Source_System
-	, MAX(Co.So_Service_Id) AS So_Service_Id
-	, Td.Process_Id
-	, Td.Task_Id
-	, Cop.Bandwdth_Cd
-	, Cop.Sub_Bandwdth_Cd
-	, Td.Task_Source
-	  FROM Dbo.Task_Details AS Td
-		  LEFT OUTER JOIN Dbo.Cods_Workflow__Customer_Order AS Co
-			  ON Td.Task_Sou = Co.Service_Order_Id
-		  LEFT OUTER JOIN Dbo.Tbl_Cods_Dsl_V_Customer_Order_Product AS Cop
-			  ON Td.Task_Sou = Cop.Serv_Order_Nbr
-WHERE Td.Task_Name IN('DesignOffnetSegment'
-					    , 'Design Offnet Segment'
-					    , 'Identify Interconnect Provider'
-					    , 'Identify_Offnet_Details_GT'
-					    , 'Process Offnet'
-					    , 'Evaluate Cancel'
-						,'Off-Net Design CFA Template','Off-Net Design CFA Template - SUP','Get Carrier VLAN and NNI Details','Offnet Manual Design Template',
-'Offnet Manual Design Template - SUP','NEWCFA Request - Adhoc','Gather costing details')
-		  AND Td.Task_Start_Date >= GETDATE() - 730
-		  AND Td.Cods_Task_Status <> 'I_SUSPENDED'
-		  AND Td.Customer_Order_Source IN('SIEBEL', 'PIPELINE', 'SWIFT', 'SWIFT (BPM)', 'EON', 'ASRI', 'CPO','N/A')
-		  and 1 = case when td.task_source = 'Flight Deck' 
-			  then case when source_task_status in ('Completed','Complete')
-			  then 1 else 0 end
-			  else 1 end
-AND Td.Task_Source in ('BPM', 'ASRI','Flight Deck')
-	  GROUP BY Td.Customer_Order_Number
-		    , Td.Task_Sou
-		    , Td.Process_Nid
-		    , Td.Task_Nid
-		    , Td.Task_Assignee
-		    , Td.Task_Name
-		    , Td.Cods_Task_Status
-		    , Td.Task_Start_Date
-		    , Td.Task_End_Date
-		    , Td.Task_Assignee
-		    , Td.Customer_Order_Source
-		    , Td.Task_Source
-		    , Td.Process_Id
-		    , Td.Task_Id
-		    , Cop.Bandwdth_Cd
-		    , Cop.Sub_Bandwdth_Cd;
+	insert into xref_order_assignees 
+		([Srvc Order Unit]
+		,order_number
+		,OMC_SOU
+		,data_src_cd
+		)
+	select
+		 t.*
+	from
+		(select 
+			 po.[srvc order unit]
+			,po.[order number]
+			,r.omc_sou
+			,po.[data src cd]			
+		from dbo.k_mart_data_daily po with (nolock)
+		left outer join rosetta_stone r with (nolock) on po.[srvc order unit] = r.sa_mart_sou and po.[order number] = r.[order number]
+		where po.pending_installed_ind = 1
+			or	po.installed_complete_ind = 1
+			and isd_month >= dbo.fn_DisplayMonth(dateadd(month,-3,getdate()))
+		) t 
+		left outer join xref_order_assignees oa with (nolock) on t.[srvc order unit] = oa.[srvc order unit]
+	where oa.[srvc order unit] is null
+	;
+	                      
+	--catch null omc sous 
+	update	a
+	set omc_sou = b.OMC_SOU
+	from dbo.xref_order_assignees a
+	inner join dbo.rosetta_stone b on a.[Srvc Order Unit] = b.SA_Mart_SOU
+	where a.omc_sou is null
+	;
+	
+	-- [Abdul Baseer 2017-04-08	- Added below query to fix order number mismatch for pipeline supp orders]
+	UPDATE X
+	set 
+		OMC_SOU					= r.omc_sou,
+		order_number			= k.[order number],
+		Provisioner				= NULL,
+		Tester					= NULL,
+		CCM						= NULL,
+		VoiceProvisioner		= NULL,
+		OffNetProvisioner		= NULL,
+		offnetprov_nt			= NULL,
+		offnet_escalation_mgr	= NULL,
+		pm_ntlogin				= NULL,
+		om_ntlogin				= NULL
+	from xref_order_assignees X 
+	inner join k_mart_data_daily K on K.[srvc order unit] = X.[Srvc Order Unit] 
+	left outer join rosetta_stone r with (nolock) on k.[srvc order unit] = r.sa_mart_sou and k.[order number] = r.[order number]
+	where K.[data src cd] = 'Pipeline' 
+	and [order type] = 'Supp'
+	and k.[order number] <> X.order_number
+	and [ord status] = 'Pending'
+	
+	--update	                      
+	update po
+	set	po.Provisioner = isnull(sp.prov_loginid ,prov2.nt_login)
+	from dbo.xref_order_assignees po with (nolock)
+	left outer join dbo.tbl_storm_orderprovisioner sp with (nolock) on po.omc_sou = sp.srvc_order_unit
+	left outer join dbo.tbl_storm_orders so with (nolock) on po.omc_sou = so.srvc_order_unit and po.order_number = so.ORDER_NUMBER
+	left outer join dbo.galcapture prov2 with (nolock) on cast(so.provisioner_id as varchar(25)) = prov2.person_id 
+	where (po.Provisioner is null or po.Provisioner <> isnull(sp.prov_loginid ,prov2.nt_login))
+		and (sp.prov_loginid is not null or	prov2.NT_LOGIN is not null)
+	;
 
---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	update po   
+	set	po.Tester = isnull(tnt2.assignedtont, tnt.nt_login)
+	from dbo.xref_order_assignees po with (nolock)
+	left outer join dbo.tbl_storm_orders so with (nolock) on po.omc_sou = so.srvc_order_unit and po.order_number = so.ORDER_NUMBER
+	left outer join dbo.galcapture tnt with (nolock) on so.tnt_person_id = tnt.person_id
+	left outer join
+		(select
+			x.OMC_SOU as srvc_order_unit
+			,x.AssignedToNT
+		from
+			(select
+				z.*
+				,isnull(y.OMC_SOU,z.srvc_order_unit) as omc_sou
+				,row_number() over (partition by isnull(y.OMC_SOU,z.srvc_order_unit) order by z.ts desc) as idx
+			from
+				(select
+					guid
+					,srvc_order_unit
+					,case when soa2.srvc_order_unit like '100%-%' then substring(soa2.srvc_order_unit,1,patindex('%-%',soa2.srvc_order_unit)-1) else soa2.srvc_order_unit end as adj_sou
+					,assignedbynt
+					,assignedtont
+					,assignedtopersonid
+					,persontypecode
+					,ts
+				from dbo.tbl_storm_orderassignees soa2 with (nolock)
+				where persontypecode = 'tnt'
+						and soa2.ts >= dbo.trunc(dateadd(day,-7,getdate()))
+				) z
+			left outer join dbo.rosetta_stone y on z.adj_sou = y.SA_Mart_SOU
+			) x
+		where	x.idx = 1
+		) tnt2 on po.omc_sou = tnt2.srvc_order_unit
+	where (po.Tester is null or	po.Tester <> isnull(tnt2.assignedtont, tnt.nt_login))
+		and (tnt2.AssignedToNT is not null or tnt.NT_LOGIN is not null)
+	;
 
-truncate table #tbl_ic_offnet_dashboard_cfa_jeops_from_cods;
-insert into #tbl_ic_offnet_dashboard_cfa_jeops_from_cods
-SELECT DISTINCT
-	  Td.Customer_Order_Number AS Customer_Order_Id
-	, Td.Task_Sou AS Service_Order_Id
-	, Td.Process_Nid
-	, Td.Task_Nid
-	, Tj.Reason_Code AS Jeopardy_Reason_Code
-	, Tj.Raised_Date AS Jeopardy_Raised_Date
-	, Tj.Created_By AS Raised_By_Performer_Name
-	, isnull(Tj.Resolution_Date,GETDATE()) AS Jeop_Resolution_Date
-	, CASE
-		 WHEN Tj.Resolution_Date IS NOT NULL
-		 THEN 'Y'
-		 ELSE 'N'
-	  END AS Jeopardy_Resolved_Ind
-	, Tj.Resolved_By AS Resolved_By_Performer_Name
-	, Td.Process_Id
-	, Td.Task_Id
-	, Td.Task_Source
-	  FROM Dbo.Task_Details AS Td
-		  INNER JOIN Dbo.Task_Jeopardy_Codes AS Tj
-			  ON Td.Task_Id = Tj.Task_Id
-	  WHERE(Td.Task_Name IN ('DesignOffnetSegment'
-					    , 'Design Offnet Segment'
-					    , 'Identify Interconnect Provider'
-					    , 'Identify_Offnet_Details_GT'
-					    , 'Evaluate Cancel'
-						,'Off-Net Design CFA Template','Off-Net Design CFA Template - SUP','Get Carrier VLAN and NNI Details','Offnet Manual Design Template',
-'Offnet Manual Design Template - SUP', 'NEWCFA Request - Adhoc','Gather costing details')
-		   OR Td.Task_Name LIKE '%Process Off%')
-	and 1 = case when td.task_source = 'Flight Deck' 
-			  then case when source_task_status in ('Completed','Complete') 
-			  then 1 else 0 end
-			  else 1 end
-		  AND Td.Task_End_Date >= GETDATE() - 400;
 
----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-truncate table #Tbl_Ic_Offnet_Assign_Cfa_New 
-INSERT INTO #Tbl_Ic_Offnet_Assign_Cfa_New
-	  SELECT DISTINCT
-		    C.*
-		  , Intvl_Bus_Hrs - Jeop_Intvl AS Adjusted_Intvl
-		  , CASE
-			   WHEN Intvl_Bus_Hrs - Jeop_Intvl <= 8
-			   THEN 1
-			   ELSE 0
-		    END AS Adjusted_Intvl_Sla_Met
-		  , So_Service_Id AS Inventory_Design_Id
-		  , Service_Order_Id AS Srvc_Order_Unit
-		  , NULL AS Net_Bus_Minutes
-		  , NULL AS Bus_Minutes_Sla_Met_Int
-		  , NULL AS Bus_Minutes_Sla_Met
-		  , NULL AS Bus_Minutes_Sla_Met_Nojeopexcluded_Int
-		  , NULL AS Bus_Minutes_Sla_Met_Nojeopexcluded
-		  , NULL AS Net_Bus_Minutes_Nojeoptimeexcluded
-		    FROM
-			( SELECT A.Customer_Order_Id
-					, A.Service_Order_Id
-					, Performer_Name
-					, Task_Start_Time
-					, Task_End_Time
-					, Intvl_Bus_Hrs
-					, CASE
-						 WHEN Intvl_Bus_Hrs <= 8
-						 THEN 1
-						 ELSE 0
-					  END AS Sla_Met
-					, A.Data_Src_Cd 
-					, MIN(DATEADD(Hh, -7, Jeopardy_Raised_Dt)) AS Min_Jeop_Open
-					, MAX(DATEADD(Hh, -7, Jeopardy_Resolution_Dt)) AS Max_Jeop_Close
-					, isnull(Dbo.Fn_Calcbusinesshours(MIN(DATEADD(Hh, -7, Jeopardy_Raised_Dt))
-					, CASE
-						WHEN MAX(DATEADD(Hh, -7, Jeopardy_Resolution_Dt)) > Task_End_Time
-						THEN Task_End_Time
-						ELSE MAX(DATEADD(Hh, -7, Jeopardy_Resolution_Dt))
-					 END), 0) AS Jeop_Intvl
-					, A.Process_Nid
-					, A.Task_Nid
-					, A.Task_Name
-					, So_Service_Id
-					,A.Task_Id
-					  FROM( SELECT DISTINCT
-								case when T.Source_System = 'N/A' then 'Flight Deck' else T.Source_System end AS Data_Src_Cd
-							   , Process_Nid
-							   , Task_Nid
-							   , Process_Id
-							   , Task_Id
-							   , T.Customer_Order_Id
-							   , T.Service_Order_Id
-							   , T.So_Service_Id
-							   , T.Performer_Name
-							   , Task_Name
-							   , DATEADD(Hh, -7, T.Task_Start_Time) AS Task_Start_Time
-							   , DATEADD(Hh, -7, T.Task_End_Time) AS Task_End_Time
-							   , Dbo.Fn_Calcbusinesshours(DATEADD(Hh, -7, T.Task_Start_Time), DATEADD(Hh, -7, T.Task_End_Time)) AS Intvl_Bus_Hrs
-								FROM #Tbl_Ic_Offnet_Dashboard_Cfa_Dos_Tasks AS T WITH (Nolock)
-			 
-						) AS A 
-						 LEFT OUTER JOIN  #Tbl_Ic_Offnet_Dashboard_Cfa_Jeops_From_Cods AS J 
-							 ON A.Process_Id = J.Process_Id
-							    AND A.Task_Id = J.Task_Id
-								and J.jeopardy_resolution_dt > A.Task_Start_Time
-					  GROUP BY A.Customer_Order_Id
-						    , A.Service_Order_Id
-						    , Performer_Name
-						    , Task_Name
-						    , Task_Start_Time
-						    , Task_End_Time
-						    , Intvl_Bus_Hrs
-						    , A.Data_Src_Cd
-						    , A.Task_Name
-						    , A.Process_Nid
-						    , A.Task_Nid
-						    , So_Service_Id 
-							,A.Task_Id
-			) AS C
+	/********************************************************************************************
+	Stage CCM data from OMC with all possible combos of logins already staged.  Will be used
+	multiple times to join based on the SOU or the PIID.  Staging to reduce overhead of the
+	query.
+	********************************************************************************************/
 
-;WITH cte AS (
-    SELECT 
-        td.taskid,
-        sh.status,
-        sh.ActivitySource,
-        sh.CreatedDttm,
-        LAG(status) OVER (PARTITION BY taskid ORDER BY CreatedDttm) AS prev_status,
-        LAG(CreatedDttm) OVER (PARTITION BY taskid ORDER BY CreatedDttm) AS prev_CreatedDttm
-    FROM staging.Flightdeck_TaskStatusHist sh
-    INNER JOIN staging.FlightdeckTaskAttributeDetail td
-        ON sh.task_instance_id = td.ID
-    WHERE sh.WorkgroupName = 'NA Offnet ETH CFA Design'	  
-),
-flagged AS (
-    SELECT
-        *,
-        CASE 
-            WHEN status <> 'Completed' AND prev_status = 'Completed' THEN 1 
-            ELSE 0 
-        END AS Post_Completed_Transition_Flag
-    FROM cte
-)
-,final as (SELECT
-    taskid,
-    status,
-    prev_status,
-    ActivitySource,
-    CreatedDttm,
-	prev_CreatedDttm,
-    Post_Completed_Transition_Flag,
-    SUM(Post_Completed_Transition_Flag) 
-        OVER (PARTITION BY taskid )
-		--ORDER BY CreatedDttm) 
---              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-        AS Post_Completed_Transition_Total
-FROM flagged
-where Post_Completed_Transition_Flag = 1  
-)
-				
---Update Business Minute fields
-UPDATE ic
-	  SET
-		 Net_Bus_Minutes = Dbo.Fn_Net_Business_Minutes_Intvl(Task_Start_Time, Task_End_Time, Min_Jeop_Open, Max_Jeop_Close)  
-							-x.Prev_Minutes,
 
-		Net_Bus_Minutes_Nojeoptimeexcluded = Dbo.Fn_Net_Business_Minutes_Intvl(Task_Start_Time, Task_End_Time, NULL, NULL)
-												- x.Prev_Minutes
-		 from #Tbl_Ic_Offnet_Assign_Cfa_New ic left join final f
-		 on ic.task_id = f.taskid
-		 Cross Apply (
-		 select ISNULL(Dbo.Fn_Net_Business_Minutes_Intvl(prev_CreatedDttm,CreatedDttm, null, null),0) as Prev_Minutes
-		 )X
-		 ;
+	--BIRA 6836 for the 2 patches here for dbo.tbl_storm_orderassignees and dbo.tbl_storm_orders
+	--          There was a mapping fix done on a go-forward basis in OMC Production Mid April 2020 per Deovrat for CCM assignments.
+	--          But there wasn't an update done to current records in StormRT assigned to the wrong James Johnson
+	Update a
+	SET assignedtont = 'JOHNSON.JAMES',
+		assignedtopersonid = '204600'
+	FROM dbo.tbl_storm_orderassignees a
+	WHERE AssignedToPersonID = '99297506'
 
-UPDATE #Tbl_Ic_Offnet_Assign_Cfa_New
-	  SET
+	--Same as Above.  This is the Storm_Orders Fix for BIRA 6836
+	Update a
+	SET cpm_full_nm = 'Johnson, James (James)',
+		cpm_person_id = '204600'  --The CCM James Johnson
+	FROM tbl_storm_orders a
+	WHERE cpm_person_id = '99297506'  --The NON-CCM James Johnson - 964 to Change over
 
-	  	 Bus_Minutes_Sla_Met_Int = CASE
-								 WHEN Net_Bus_Minutes <= 1440
-								 THEN 1
-								 ELSE 0
-							  END,
-		 Bus_Minutes_Sla_Met = CASE
-							  WHEN Net_Bus_Minutes <= 1440
-							  THEN 'Made'
-							  ELSE 'Missed'
-						   END,
-		 Bus_Minutes_Sla_Met_Nojeopexcluded_Int = CASE
-											 WHEN Net_Bus_Minutes_Nojeoptimeexcluded <= 1440
-											 THEN 1
-											 ELSE 0
-										  END,
-		 Bus_Minutes_Sla_Met_Nojeopexcluded = CASE
-										  WHEN Net_Bus_Minutes_Nojeoptimeexcluded <= 1440
-										  THEN 'Made'
-										  ELSE 'Missed'
-									   END;
+	update po
+	set	po.voiceprovisioner = isnull(v2.assignedtont,voice.nt_login)
+	from dbo.xref_order_assignees po with (nolock)
+	left outer join dbo.tbl_storm_orders so with (nolock) on po.omc_sou = so.srvc_order_unit and po.order_number = so.ORDER_NUMBER
+	left outer join
+		(select
+			srvc_order_unit
+			,assignedtont
+		from dbo.tbl_storm_orderassignees as soa with (nolock)
+		where persontypecode = 'voice'
+		) v2 on po.omc_sou = v2.srvc_order_unit
+	left outer join dbo.galcapture voice with (nolock) on so.voice_provisioner_id = voice.person_id 
+	where (v2.assignedtont is not null or voice.nt_login is not null)
+		and (po.VoiceProvisioner is null or	po.VoiceProvisioner <> isnull(v2.assignedtont,voice.nt_login))
+	;
 
-EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 2',1;
-EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 3',0;
+	update po
+	set	po.OffNetProvisioner = a.asr_rep
+	from dbo.xref_order_assignees po
+	inner join
+		(select
+			z.SRVC_ORDER_UNIT
+			,z.ORDER_NUMBER
+			,max(asr_rep) as asr_rep
+		from dbo.tbl_storm_asrs z with (nolock)
+		where	z.ASR_REP is not null
+		group by z.SRVC_ORDER_UNIT,z.ORDER_NUMBER
+		) a	on po.[Srvc Order Unit] = a.SRVC_ORDER_UNIT and po.order_number = a.ORDER_NUMBER
+	where po.OffNetProvisioner is null or po.OffNetProvisioner <> a.asr_rep
+	;
+
+	update a
+	set	OffNetProvisioner = c.full_name
+	from dbo.xref_order_assignees a with (nolock)
+	inner join dbo.tbl_Storm_OrderAssignees b with (nolock) on	a.OMC_SOU = b.srvc_order_unit and b.PersonTypeCode = 'ONETPROV'
+	inner join dbo.galcapture c with (nolock) on b.AssignedToNT = c.NT_LOGIN
+	where a.data_src_cd not in ('SWIFT','SWIFT (BPM)')
+	;
+	--Join with related order items table to have the offnet provisioner for the SWIFT/SWIFT (BPM) orders
+	update a
+	set	OffNetProvisioner = c.full_name
+	from dbo.xref_order_assignees a with (nolock)
+	inner join related_order_items r on a.[Srvc Order Unit] = replace(r.primary_order_item,'-','/')
+    inner join Tbl_Storm_OrderAssignees b on replace(r.order_item,'-','/')= b.srvc_order_unit
+	inner join dbo.galcapture c with (nolock) on b.AssignedToNT = c.NT_LOGIN
+	where isnull(r.data_source_location,'Keep') <> 'Derived_DSL_SD'
+    and r.source_system in ('SWIFT','SWIFT (BPM)')
+    and 1=case when r.product_name like '%Access - Off Net%' and b.PersonTypeCode = 'ONETPROV' then 1
+	when b.PersonTypeCode = 'ONETPROV' then 1 else 0 end
+	;
+
+	update a
+	set offnetprov_nt = b.NT_LOGIN
+	from dbo.xref_order_assignees a with (nolock)
+	inner join dbo.GALCapture b with (nolock) on a.OffNetProvisioner = b.FULL_NAME
+	where a.OffNetProvisioner is not null
+	;
+
+	update a
+	set offnet_escalation_mgr = b.AssignedToNT
+	from dbo.xref_order_assignees a with (nolock)
+	inner join dbo.Tbl_Storm_OrderAssignees b with (nolock) on a.OMC_SOU = b.srvc_order_unit and b.PersonTypeCode = 'VendorEscalationManager'
+	;
+					
+	update a
+	set	a.pm_ntlogin = b.AssignedToNT
+	from dbo.xref_order_assignees a with (nolock)
+	inner join dbo.tbl_Storm_OrderAssignees b with (nolock) on a.OMC_SOU = b.srvc_order_unit and b.PersonTypeCode = 'pm'
+	;
+
+	update a
+	set	a.om_ntlogin = b.AssignedToNT
+	from dbo.xref_order_assignees a with (nolock)
+	inner join dbo.tbl_Storm_OrderAssignees b with (nolock) on a.OMC_SOU = b.srvc_order_unit and b.PersonTypeCode = 'om'
+	;
+
+	delete from dbo.xref_order_assignees
+	where id in	(select 
+					id
+				from
+					(select 
+						 a.*
+						, ROW_NUMBER() over (partition by a.[srvc order unit] order by id desc) as souidx
+					from xref_order_assignees a
+					) a
+				where a.souidx > 1
+				)
+	;   
+	
+	
+	-----------------------------------------------------------------------------------------------
+	--  Clean up any logins from OMC that do not match NT login but CUID or Universal Id
+	-----------------------------------------------------------------------------------------------               
+	-------------
+	-- CCM not needed as done in the above CCM code directly
+	-------------	
+
+	----------------
+	-- Provisioner 
+	----------------
+	UPDATE 
+        xref 
+    SET
+        Provisioner = xcuid.nt_login
+    FROM 
+        dbo.xref_order_assignees xref 
+	        INNER JOIN 
+		        (SELECT DISTINCT 
+                     xoa.provisioner
+                   , gcCUID.nt_login
+                 FROM
+                     dbo.xref_order_assignees xoa
+                         LEFT OUTER JOIN
+		                     dbo.galCapture gcCheck 
+			                     ON xoa.provisioner = gcCheck.nt_login 
+		                 INNER JOIN
+    		                 dbo.galCapture gcCUID
+			                     ON xoa.provisioner = gcCUID.cuid
+                 WHERE
+                    gcCheck.nt_login IS NULL) xcuid
+        ON xref.provisioner = xcuid.provisioner
+	WHERE xcuid.nt_login is not null --ONLY update if a non-null result is returned
+	;
+
+	--3-6-2019: Phil Ferlin: For DIA Products OMC stores the Provisioner in StormOrderProvisioner with order_number + '/' + pcid
+	Update a
+	SET provisioner = prov_loginid
+	FROM
+	  dbo.xref_order_assignees a inner join
+	  (
+		SELECT
+		  dd.[sa recvd dt], dd.[srvc order unit], dd.[data src cd], dd.[prod type],
+		  so.order_number + '/' + so.pcid AS assignment_sou, 
+		  op.prov_loginid,
+		  gc1.full_name as Provisioner
+		FROM
+		  dbo.k_mart_data_daily dd inner join
+		  dbo.tbl_storm_orders so ON dd.[srvc order unit] = so.srvc_order_unit inner join
+		  dbo.stg_Storm_OrderProvisioner op ON so.order_number + '/' + so.pcid = op.srvc_order_unit inner join
+		  dbo.galcapture gc1 ON op.prov_loginid = gc1.nt_login
+	  ) b ON a.[srvc order unit] = b.[srvc order unit]
+	WHERE
+	  a.provisioner is null
+
+--Pass #2 using child products of DIA that are parent SOU's
+--TESTING
+--select
+--scp.SRVC_ORDER_UNIT, scp.SRVC_ORDER_UNIT_PIID, scp.prov_child_product, parent_child_ind, op.srvc_order_unit, 
+--op.prov_full_nm, op.prov_loginID, xoa.[srvc order unit], xoa.provisioner
+Update xoa
+Set provisioner = op.prov_loginID
+from
+dbo.tbl_STORM_SWIFT_CHILD_PRODUCTS scp inner join
+dbo.tbl_storm_orderprovisioner op on scp.SRVC_ORDER_UNIT_PIID = op.srvc_order_unit inner join
+dbo.xref_order_assignees xoa on scp.SRVC_ORDER_UNIT = xoa.[srvc order unit]
+where
+--scp.SRVC_ORDER_UNIT In ('551717161/442595663', '551930175/443158547', '551870975/442825792', '551857334/442976202')
+--and
+----prov_child_product = 'Dedicated Internet Access'
+parent_child_ind = 'P'
+and 
+(xoa.provisioner is null or IsNull(xoa.provisioner,'None') <> IsNull(op.prov_loginID, 'Null'))
+
+
+    ----------------
+	-- Tester 
+	----------------
+	UPDATE 
+        xref 
+    SET
+        tester = xcuid.nt_login
+    FROM 
+        dbo.xref_order_assignees xref 
+	        INNER JOIN 
+		        (SELECT DISTINCT 
+                     xoa.tester
+                   , gcCUID.nt_login
+                 FROM
+                     dbo.xref_order_assignees xoa
+                         LEFT OUTER JOIN
+		                     dbo.galCapture gcCheck 
+			                     ON xoa.tester = gcCheck.nt_login 
+		                 INNER JOIN
+    		                 dbo.galCapture gcCUID
+			                     ON xoa.tester = gcCUID.cuid
+                 WHERE
+                    gcCheck.nt_login IS NULL) xcuid
+        ON xref.tester = xcuid.tester
+		WHERE xcuid.nt_login is not null --ONLY update if a non-null result is returned;
+	
+	--3-6-2019: Phil Ferlin: For DIA Products OMC stores the Tester in Tbl_Storm_OrderAssignees with order_number + '/' + pcid
+	Update a
+	SET tester = assignedtont
+	FROM
+	  dbo.xref_order_assignees a inner join
+	  (
+		SELECT
+		  dd.[sa recvd dt], dd.[srvc order unit], dd.[data src cd], dd.[prod type],
+		  so.order_number + '/' + so.pcid as assignment_sou,
+		  oa.assignedtont,
+		  gc.full_name AS Tester
+		FROM
+		  dbo.k_mart_data_daily dd inner join
+		  dbo.tbl_storm_orders so on dd.[srvc order unit] = so.srvc_order_unit inner join
+		  (SELECT * FROM Tbl_Storm_OrderAssignees WHERE persontypecode = 'TNT') oa ON so.order_number + '/' + so.pcid = oa.srvc_order_unit inner join
+		  dbo.galcapture gc ON oa.assignedtont = gc.nt_login 
+	  ) b ON a.[srvc order unit] = b.[srvc order unit]
+	WHERE
+	  a.tester is null
+
+    ----------------
+	-- Voice Provisioner 
+	----------------
+	UPDATE 
+        xref 
+    SET
+        VoiceProvisioner = xcuid.nt_login
+    FROM 
+        dbo.xref_order_assignees xref 
+	        INNER JOIN 
+		        (SELECT DISTINCT 
+                     xoa.VoiceProvisioner
+                   , gcCUID.nt_login
+                 FROM
+                     dbo.xref_order_assignees xoa
+                         LEFT OUTER JOIN
+		                     dbo.galCapture gcCheck 
+			                     ON xoa.VoiceProvisioner = gcCheck.nt_login 
+		                 INNER JOIN
+    		                 dbo.galCapture gcCUID
+			                     ON xoa.VoiceProvisioner = gcCUID.cuid
+                 WHERE
+                    gcCheck.nt_login IS NULL) xcuid
+        ON xref.VoiceProvisioner = xcuid.VoiceProvisioner
+		WHERE xcuid.nt_login is not null --ONLY update if a non-null result is returned;
+
+
+    ----------------
+	-- Offnet Prov Nt 
+	----------------
+	UPDATE 
+        xref 
+    SET
+        offnetprov_nt = xcuid.nt_login
+    FROM 
+        dbo.xref_order_assignees xref 
+	        INNER JOIN 
+		        (SELECT DISTINCT 
+                     xoa.offnetprov_nt
+                   , gcCUID.nt_login
+                 FROM
+                     dbo.xref_order_assignees xoa
+                         LEFT OUTER JOIN
+		                     dbo.galCapture gcCheck 
+			                     ON xoa.offnetprov_nt = gcCheck.nt_login 
+		                 INNER JOIN
+    		                 dbo.galCapture gcCUID
+			                     ON xoa.offnetprov_nt = gcCUID.cuid
+                 WHERE
+                    gcCheck.nt_login IS NULL) xcuid
+        ON xref.offnetprov_nt = xcuid.offnetprov_nt
+		WHERE xcuid.nt_login is not null --ONLY update if a non-null result is returned;
+
+
+    ----------------
+	-- Offnet Escalation MGR
+	----------------
+	UPDATE 
+        xref 
+    SET
+        offnet_escalation_mgr = xcuid.nt_login
+    FROM 
+        dbo.xref_order_assignees xref 
+	        INNER JOIN 
+		        (SELECT DISTINCT 
+                     xoa.offnet_escalation_mgr
+                   , gcCUID.nt_login
+                 FROM
+                     dbo.xref_order_assignees xoa
+                         LEFT OUTER JOIN
+		                     dbo.galCapture gcCheck 
+			                     ON xoa.offnet_escalation_mgr = gcCheck.nt_login 
+		                 INNER JOIN
+    		                 dbo.galCapture gcCUID
+			                     ON xoa.offnet_escalation_mgr = gcCUID.cuid
+                 WHERE
+                    gcCheck.nt_login IS NULL) xcuid
+        ON xref.offnet_escalation_mgr = xcuid.offnet_escalation_mgr
+		WHERE xcuid.nt_login is not null --ONLY update if a non-null result is returned;
+
+
+    ----------------
+	-- PM NT LOGIN
+	----------------
+	UPDATE 
+        xref 
+    SET
+        pm_ntlogin = xcuid.nt_login
+    FROM 
+        dbo.xref_order_assignees xref 
+	        INNER JOIN 
+		        (SELECT DISTINCT 
+                     xoa.pm_ntlogin
+                   , gcCUID.nt_login
+                 FROM
+                     dbo.xref_order_assignees xoa
+                         LEFT OUTER JOIN
+		                     dbo.galCapture gcCheck 
+			                     ON xoa.pm_ntlogin = gcCheck.nt_login 
+		                 INNER JOIN
+    		                 dbo.galCapture gcCUID
+			                     ON xoa.pm_ntlogin = gcCUID.cuid
+                 WHERE
+                    gcCheck.nt_login IS NULL) xcuid
+        ON xref.pm_ntlogin = xcuid.pm_ntlogin
+		WHERE xcuid.nt_login is not null --ONLY update if a non-null result is returned;
+
+	/*TEmporary updates CMT 12/21/2018 
+	UPDATE 
+	    dbo.xref_order_assignees
+	SET
+	    ccm = null 
+	WHERE
+	    omc_sou IN ('1080697-2006675216','1039941-2006085079');
+*/
+
+	
+	UPDATE 
+        xref 
+    SET
+        pm_ntlogin = b.assignedtont
+	FROM
+	  dbo.xref_order_assignees xref inner join
+	  (
+		SELECT
+		  dd.[sa recvd dt], dd.[srvc order unit], dd.[data src cd], dd.[prod type],
+		  so.order_number + '/' + so.pcid as assignment_sou,
+		  oa.assignedtont,
+		  gc.full_name AS Project_Manager
+		FROM
+		  dbo.k_mart_data_daily dd inner join
+		  dbo.tbl_storm_orders so on dd.[srvc order unit] = so.srvc_order_unit inner join
+		  (SELECT * FROM Tbl_Storm_OrderAssignees WHERE persontypecode = 'PM') oa ON so.order_number + '/' + so.pcid = oa.srvc_order_unit inner join
+		  dbo.galcapture gc ON oa.assignedtont = gc.nt_login 
+	  ) b ON xref.[srvc order unit] = b.[srvc order unit]
+	WHERE
+	  xref.pm_ntlogin is null
+
+
+			    
+	--Clearing PM values when OMC removes it (For WIP orders only)
+	UPDATE xref
+      SET xref.pm_ntlogin = asgn.AssignedToNT	
+	FROM dbo.xref_order_assignees xref 
+	    INNER JOIN k_mart_data_daily kmdd 
+		    ON xref.[Srvc Order Unit] = kmdd.[srvc order unit]
+	    INNER JOIN dbo.tbl_storm_orders so 
+		    ON xref.omc_sou = so.srvc_order_unit
+	    LEFT OUTER JOIN dbo.tbl_Storm_OrderAssignees asgn 
+		    ON xref.omc_sou = asgn.srvc_order_unit and asgn.PersonTypeCode = 'pm'
+	WHERE asgn.srvc_order_unit IS NULL 
+		AND xref.pm_ntlogin IS NOT NULL
+	      AND kmdd.isd_month IS NULL 
+		
+/*    	  
+ --PM update for DIA swift orders
+	UPDATE xref
+      SET xref.pm_ntlogin = soa.AssignedToNT	
+	FROM dbo.xref_order_assignees xref 
+	    INNER JOIN k_mart_data_daily kmdd 
+		    ON xref.[Srvc Order Unit] = kmdd.[srvc order unit]
+	    INNER JOIN related_order_items AS roi 
+		    ON xref.[Srvc Order Unit] = REPLACE(roi.primary_order_item, '-', '/')
+	    INNER JOIN dbo.tbl_Storm_OrderAssignees soa 
+		    ON REPLACE(roi.order_item, '-', '/') = soa.srvc_order_unit 
+			  AND (1 = CASE WHEN roi.product_name = 'Dedicated Internet Access' AND soa.PersonTypeCode = 'PM' THEN 1 END)
+			  AND roi.source_system IN ('SWIFT', 'SWIFT (BPM)')
+			  AND (ISNULL(roi.data_source_location, 'Keep') = 'DSL_SD (Component)')
+	WHERE xref.pm_ntlogin IS NULL
+	      AND kmdd.isd_month IS NULL 
+	
+		  
+ --PM update from component level swift orders
+	UPDATE xref
+      SET xref.pm_ntlogin = rel_pm.AssignedToNT	
+	FROM dbo.xref_order_assignees xref 
+	    INNER JOIN k_mart_data_daily kmdd 
+		    ON xref.[Srvc Order Unit] = kmdd.[srvc order unit]
+	     INNER JOIN 
+		(
+		 SELECT DISTINCT roi.primary_order_item, soa.AssignedToNT  
+		  FROM related_order_items AS roi 
+				INNER JOIN dbo.tbl_Storm_OrderAssignees soa 
+		    ON REPLACE(roi.order_item, '-', '/') = soa.srvc_order_unit 
+			  AND soa.PersonTypeCode = 'PM'
+			  AND roi.source_system IN ('SWIFT', 'SWIFT (BPM)')
+			  AND (ISNULL(roi.data_source_location, 'Keep') = 'DSL_SD (Component)')
+		)
+		rel_pm
+		    ON xref.[Srvc Order Unit] = REPLACE(rel_pm.primary_order_item, '-', '/')
+	WHERE xref.pm_ntlogin IS NULL	
+
+	--INC6461696: Hard code fix to NULL the PM for order that is referencing OMC whereas QMV does not have a PM identified
+	UPDATE 
+	    dbo.xref_order_assignees
+	SET
+	    pm_ntlogin = null 
+	WHERE
+	    [srvc order unit] IN ('553088564/444802909');
+*/
+
+
+      /*^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+	                   CODE For Green PM (SDP)
+	  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^*/
+	  MERGE
+	      dbo.xref_order_assignees AS xr
+		  USING (
+				 SELECT DISTINCT
+	                 kmd.[srvc order unit]
+				   , kmd.[installed dt]
+				   , od.core_sales_order_id
+				   , cods.cods_pm_login as cods_pm_login -- removed kmd.pm_login and coalesce function as per INC4679031
+	             FROM
+	                 dbo.k_mart_data_daily		kmd
+						left outer join dbo.ctl_sdp_to_core_xref	xr
+							on kmd.[srvc order unit]	= xr.serv_order_nbr
+						left outer join dbo.order_details			od
+							on kmd.[srvc order unit]	= od.primary_order_item 
+						left outer join (
+							select primary_order_item, cods_pm_login from (
+								SELECT 
+									  od.primary_order_item
+									, gal.nt_login cods_pm_login
+									, ROW_NUMBER() OVER (PARTITION BY od.primary_order_item ORDER BY CASE WHEN source_role_source_system = 'LIMS' THEN 1 WHEN source_role_source_system = 'SDP' THEN 2 END, oc.date_loaded desc, oc.source_contact_ods_id desc)  row_num
+								FROM
+									  dbo.order_details od
+									, cods.order_contacts oc			 --- cods
+									, dbo.GALCapture gal
+								WHERE
+									    od.source_system = 'SDP'
+									AND od.primary_order_item = oc.sou
+									AND oc.derived_role_Name LIKE '%Proj%Mgr%'
+									AND oc.source_contact_status_cd = 'Active'
+									AND (upper(oc.source_contact_email) like '%CENTURYLINK.COM%' or upper(oc.source_contact_email) like '%LUMEN.COM%')
+									AND oc.employee_ods_id is not null
+									AND oc.employee_ods_id = gal.employee_ods_id
+								) z 
+							where row_num = 1 ) cods
+							on kmd.[srvc order unit]	= cods.primary_order_item 
+	             WHERE
+	                 kmd.[data src cd]			= 'SDP'  
+					 					 ) as src
+			 ON xr.[srvc order unit] = src.[srvc order unit]
+			WHEN MATCHED AND isNull(xr.pm_ntlogin,'x') <> isNull(src.cods_pm_login,'x') 
+				 AND 
+				 ( 
+				  (
+				   core_sales_order_id is not null
+				   and ( [installed dt] is null 
+						 or [installed dt] >= DATEADD(month, DATEDIFF(month, 0, getdate()), 0) 
+						 or core_sales_order_id in ('180610154','181380619')  -- BIRA 7243 Special fix for older installed orders
+						 )
+				  )
+				 )
+				THEN UPDATE SET xr.pm_ntlogin = src.cods_pm_login
+			WHEN NOT MATCHED AND src.cods_pm_login IS NOT NULL 
+				 AND 
+				  (
+				   core_sales_order_id is not null
+				   and ( [installed dt] is null or [installed dt] >= DATEADD(month, DATEDIFF(month, 0, getdate()), 0) )
+				  )
+			    THEN 
+			    INSERT ([srvc order unit],data_src_cd,pm_ntlogin) VALUES (src.[srvc order unit],'SDP',src.cods_pm_login);
+
+
+	  --------------------------------------------------------
+	  -- Inserting PMs that are CCM's witha  PM role
+	  --------------------------------------------------------
+	  MERGE
+	      dbo.xref_order_assignees AS xr
+		  USING (SELECT 
+                     kmd.[srvc order unit]
+				   , gc.nt_login pm_login
+				 FROM
+				     dbo.k_mart_data_daily kmd  
+	                 LEFT OUTER JOIN
+	                    dbo.xref_order_assignees xoa
+		                   ON kmd.[srvc order unit] = xoa.[srvc order unit]
+			                  AND xoa.pm_ntlogin IS NULL
+                    INNER JOIN
+	                   dbo.galCapture gc
+		                 ON kmd.ccm_login = gc.nt_Login
+				WHERE
+					kmd.[data src cd] = 'SDP'
+					AND gc.job_title LIKE '%Project%Manag%'
+					AND gc.employee_status = 'Active'
+					AND xoa.pm_ntlogin IS NULL) as src
+			 ON xr.[srvc order unit] = src.[srvc order unit]
+			WHEN MATCHED AND isNull(xr.pm_ntlogin,'x') <> isNull(src.pm_login,'x') AND xr.pm_ntlogin IS NULL THEN 
+			    UPDATE SET xr.pm_ntlogin = src.pm_login
+			WHEN NOT MATCHED AND src.pm_login IS NOT NULL THEN 
+			    INSERT ([srvc order unit],data_src_cd,pm_ntlogin) VALUES (src.[srvc order unit],'SDP',src.pm_login);
+
+--- Chad approved this to quite the noise on these orders.
+ /*      UPDATE
+	       dbo.xref_order_assignees
+	   SET pm_ntlogin = NULL
+	   WHERE [srvc order unit] IN ('239162889/5543323','239110019/5483965','239110019/5483964','239110018/5484121','239110018/5484120'
+								  ,'239110018/5484119','239110018/5484118','239110018/5484117','239110018/5484116','239110018/5484115'
+								  ,'240001014/4760110','239923617/4454904','239951517/5879038'
+								  ,'551491018/442388953')
+								  AND pm_ntlogin is not null;
+*/								  
+								  
+	----5.3 START
+		/*Adding PM Names from CDW */								  
+
+		UPDATE  xoa 
+		SET pm_ntlogin =gal.nt_login
+		FROM dbo.xref_order_assignees xoa 
+		INNER JOIN 
+			CSD_MART.cods.SERV_DLVRY_PRODUCT sdp 
+				ON xoa.[Srvc Order Unit] = sdp.SERV_ORDER_NBR
+		LEFT JOIN 
+		dbo.GALCapture gal
+			ON sdp.pm_user_id=gal.cuid
+		WHERE 
+			CASE WHEN sdp.serv_dlvry_action_cmplt_dt IS NOT NULL AND sdp.pm_user_id IS NOT NULL 
+					THEN 'Y'
+				 WHEN sdp.serv_dlvry_action_cmplt_dt IS NULL AND sdp.DW_SOURCE_SYSTEM_CD <> 'SDP' ---SDP PM is source from Cods Order Contacts
+					THEN 'Y'
+				 ELSE 'N' END = 'Y'
+		   
+		----5.3 END
+
+/*Setting up Special Project Flag based on pm_ntlogin*/
+
+	UPDATE xoa
+	SET special_project_flag = CASE 
+								WHEN vspm.nt_login IS NULL 
+									THEN 'N'
+									ELSE 'Y'
+							   END 
+	FROM dbo.xref_order_assignees xoa
+		LEFT OUTER JOIN dbo.vw_special_project_pm vspm
+			ON xoa.pm_ntlogin = vspm.nt_login;
+
+
+/*  INC6566037- Use the Xref logic for BU Segment FED, remaining BU's use the PM data flowing from CDW  */
+
+update xoa
+set xoa.pm_ntlogin = gal.nt_login --sdp.pm_user_id
+from dbo.xref_order_assignees xoa
+		inner JOIN csd_mart.cods.serv_dlvry_product sdp
+			ON xoa.[Srvc Order Unit] = sdp.SERV_ORDER_NBR
+			left join dbo.TBL_SFDC_ACCOUNT borg 
+			ON sdp.cust_nbr = borg.BUS_ORG_ID
+			left join dbo.galcapture gal
+			on sdp.pm_user_id = gal.cuid
+where borg.bu_segment <>  'Federal';
+
+
+	  /*^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+	                   Archive Data
+					   2nd Sunday of every month, archive off data no longer 
+					   applicable for us
+	  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^*/
+	  IF datename(weekday,getdate()) = 'Sunday' AND datepart(d,getdate()) > 7 AND  datepart(d,getdate()) < 15 
+	      BEGIN
+		      ----------------------------
+			  --  Insert into archive
+			  ----------------------------
+		      INSERT INTO
+                  csd_mart.sas.xref_order_assignees_archive
+	                  ([srvc order unit] 
+                     , [omc_sou] 
+	                 , [provisioner] 
+	                 , [tester] 
+	                 , [ccm] 
+	                 , [voiceprovisioner] 
+	                 , [offnetprovisioner]
+	                 , [offnetprov_nt] 
+	                 , [offnet_escalation_mgr] 
+	                 , [id] 
+	                 , [pm_ntlogin] 
+	                 , [om_ntlogin] 
+	                 , [order_number] 
+                     , [data_src_cd] )
+              SELECT
+                  xoa.[srvc order unit] 
+                , xoa.[omc_sou] 
+	            , xoa.[provisioner] 
+	            , xoa.[tester] 
+	            , xoa.[ccm] 
+	            , xoa.[voiceprovisioner] 
+	            , xoa.[offnetprovisioner]
+	            , xoa.[offnetprov_nt] 
+	            , xoa.[offnet_escalation_mgr] 
+            	, xoa.[id] 
+	            , xoa.[pm_ntlogin] 
+	            , xoa.[om_ntlogin] 
+	            , xoa.[order_number] 
+                , xoa.[data_src_cd] 
+            FROM
+                dbo.xref_order_assignees xoa
+                LEFT OUTER JOIN
+	                dbo.k_mart_data_daily kmd
+		                ON xoa.[Srvc Order Unit] = kmd.[srvc order unit]
+            WHERE
+                 kmd.[srvc order unit] IS NULL;
+
+		      ----------------------------
+			  --  Cleanup Table
+			  ----------------------------
+			  DELETE 
+                  xoa 
+              FROM
+                  dbo.xref_order_assignees xoa
+	              INNER JOIN
+	              csd_mart.sas.xref_order_assignees_archive xoaa
+	                  ON xoa.[Srvc Order Unit] = xoaa.[srvc order unit];
+
+		      EXEC dbo.usp_check_index_status @iDataBase= 'csd_mart', @iTable='sas.xref_order_assignees_archive';
+		  END;
+
+	 
+	 
+	     EXEC dbo.usp_check_index_status @iDataBase= 'sa_staging', @iTable='dbo.xref_order_assignees';
+	   
+      --Log Job Complete
+	EXEC dbo.sp_jv_update
+ 		@reportname = 'xref_order_assignees'
+       ,@updatetype = 1
+	 	              
+	END TRY
+
+
+  BEGIN CATCH
 
  
+   
+        DECLARE @ErrorNumber	INT = ERROR_NUMBER();
+        DECLARE @ErrorLine		INT = ERROR_LINE();
+        DECLARE @ErrorMessage	NVARCHAR(4000) = ERROR_MESSAGE();
+        DECLARE @ErrorSeverity	INT = ERROR_SEVERITY();
+        DECLARE @ErrorState		INT = ERROR_STATE();
+	  DECLARE @vOutputError	VARCHAR(MAX) = @vProcessName+' Error: Line '+CAST(@ErrorLine AS VARCHAR(10))+' -- '+CAST(@ErrorNumber AS varchar(10))+' - '+@ErrorMessage;
 
----------------------------------------------------------------------------------------------------------------------------------------------------------------------
---Report Query
+       
+  
+        PRINT 'Actual error number: ' + CAST(@ErrorNumber AS VARCHAR(10));
+        PRINT 'Actual line number: ' + CAST(@ErrorLine AS VARCHAR(10));
+	  PRINT 'ERR MSG: '+ CAST(@ErrorMessage AS VARCHAR(4000));
+  
+	------------------
+	--  Error Job   --
+      ------------------
+	EXEC dbo.sp_jv_update	@reportName = 'xref_order_assignees'
+		    				, @updatetype = 1
+							, @iErrorMessage = @vOutputError;
 
-declare	@RB datetime =  format(dateadd(MONTH,-13,GETDATE()),'yyyy-MM-01'); 
-declare    @RE datetime = cast(GETDATE() as date);
-DECLARE @Counter INT = 0;
-
-IF OBJECT_ID('tempdb..#t') IS NOT NULL DROP TABLE #t
-create table #t (mon date)
-
-WHILE @Counter <= datediff(day,format(dateadd(MONTH,-13,GETDATE()),'yyyy-MM-01'),getdate())
-BEGIN
-	insert into #t Select  cast(dateadd(day,-@counter,@re) as date) --convert(varchar(7),DATEADD(M,-@Counter,@RE),120)    
-    SET @Counter = @Counter + 1;
-END;
-
-IF OBJECT_ID('tempdb..#List') IS NOT NULL DROP TABLE #List
-Create Table #List
-( Director varchar(100) null,  Manager varchar(100) null, Manager_Full_Name varchar(100) null,  NT_Login varchar(100) null, NT_Login_Full_Name varchar(100) null, 
-Contractor_Flag varchar(100) null, GAL_Contractor_Flag varchar(1) null,  Non_EO_Contractor varchar(100) null)
-Insert Into #List select * from 
-	 (select Director, Manager, Manager_Full_Name, EO as NT_Login, EO_Full_Name as NT_Login_Full_Name,
-Case When os.NT_Login IS Null and Org.contractor_flag = 'n' Then 'OnShore EO' 
-	 When os.NT_Login IS Null and Org.contractor_flag = 'y' Then 'OnShore Contractor' Else os.Contractor 
-	 End Contractor_Flag,
-	Org.Contractor_Flag as GAL_Contractor_Flag, os.NT_Login as Non_EO_Contractor 
-	from dbo.vw_offnet_prov_org org with (nolock) 
-		Left Outer Join dbo.vw_Offshore_Contractors os on EO = OS.NT_Login
-		)a
-
-IF OBJECT_ID('tempdb..#bom') IS NOT NULL DROP TABLE #bom
-
-SELECT Customer_Order_Id
-		  , Service_Order_Id
-		  , Srvc_Order_Unit
-		  , Performer_Name
-		  , Task_Nid as bom_task_nid
-		  , Cfa_Task_Count
-		  , Performer_Cfa_Task_Count
-		  , Cfa_Jeop_Count
-		  , Task_Name as bom_task_name
-		  , Task_Start_Time
-		  , Task_End_Time
-		  , Dbo.Fn_Net_Business_Minutes_Intvl(Task_Start_Time, Task_End_Time, null, null) AS Net_Business_Minutes_Raw
-		  , Intvl_Bus_Hrs
-		  , Sla_Met
-		  , Data_Src_Cd
-		  , Min_Jeop_Open AS Jeop_Start_Time
-		  , Max_Jeop_Close AS Jeop_End_Time
-		  , Adj_Jeop_Close AS Adj_Jeop_End_Time
-		  , Dbo.Fn_Net_Business_Minutes_Intvl(Min_Jeop_Open, Adj_Jeop_Close, NULL, NULL) AS Jeop_Net_Business_Minutes
-		  , Jeop_Intvl
-		  , Adjusted_Intvl
-		  , Adjusted_Intvl_Sla_Met
-		  , Supervisor_Name
-		  , Sla
-		  , Sla_Status
-		  , Adjusted_Intvl_Sla_Status
-		  , Inventory_Design_Id
-		  , Net_Bus_Minutes
-		  , Bus_Minutes_Sla_Met_Int
-		  , Bus_Minutes_Sla_Met
-		  ,Net_Bus_Minutes_NoJeopTimeExcluded
-		  ,Bus_Minutes_SLA_Met_NoJeopExcluded_Int
-		  ,task_id
-		  into #BOM 
-  	      FROM ( SELECT Detail.*
-					, Performer_Cfa_Task_Count
-					, Cfa_Task_Count
-					, Cfa_Jeop_Count
-					, Gc.Supervisor_Name				
-					, '8 Bus Hrs' AS Sla
-					, CASE
-						 WHEN Sla_Met = 1
-						 THEN 'Yes'
-						 ELSE 'No'
-					  END AS Sla_Status
-					, CASE
-						 WHEN Adjusted_Intvl_Sla_Met = 1
-						 THEN 'Yes'
-						 ELSE 'No'
-					  END AS Adjusted_Intvl_Sla_Status
-					, CASE
-						 WHEN Max_Jeop_Close > Task_End_Time
-						 THEN Task_End_Time
-						 ELSE Max_Jeop_Close
-					  END AS Adj_Jeop_Close
-					  FROM( SELECT A.*
-							   , CASE
-								    WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
-								    THEN Customer_Order_Id
-								    ELSE Service_Order_Id
-								END AS Sou_Join
-								FROM #Tbl_Ic_Offnet_Assign_Cfa_New AS A ) AS Detail
-						 LEFT OUTER JOIN Dbo.Galcapture AS Gc
-							 ON Detail.Performer_Name = Gc.Nt_Login
-						 LEFT OUTER JOIN( SELECT CASE
-											    WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
-											    THEN Customer_Order_Id
-											    ELSE Service_Order_Id
-											END AS Sou_Join
-										   , COUNT(*) AS Cfa_Task_Count
-											FROM #Tbl_Ic_Offnet_Assign_Cfa_New AS Detail
-											GROUP BY CASE
-													   WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
-													   THEN Customer_Order_Id
-													   ELSE Service_Order_Id
-												    END ) AS Cfa_Tasks
-							 ON Detail.Sou_Join = Cfa_Tasks.Sou_Join
-						 LEFT OUTER JOIN( SELECT Performer_Name
-										   , CASE
-											    WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
-											    THEN Customer_Order_Id
-											    ELSE Service_Order_Id
-											END AS Sou_Join
-										   , COUNT(*) AS Performer_Cfa_Task_Count
-											FROM #Tbl_Ic_Offnet_Assign_Cfa_New AS Detail
-											GROUP BY Performer_Name
-												  , CASE
-													   WHEN Data_Src_Cd IN('SWIFT', 'SWIFT (BPM)', 'CPO','ASRI')
-													   THEN Customer_Order_Id
-													   ELSE Service_Order_Id
-												    END ) AS Cfa_Tasks_For_This_Performer
-							 ON Detail.Performer_Name = Cfa_Tasks_For_This_Performer.Performer_Name
-							    AND Detail.Sou_Join = Cfa_Tasks_For_This_Performer.Sou_Join
-						 LEFT OUTER JOIN( SELECT Service_Order_Id
-										   , COUNT(*) AS Cfa_Jeop_Count
-											FROM #Tbl_Ic_Offnet_Dashboard_Cfa_Jeops_From_Cods
-											GROUP BY Service_Order_Id ) AS Cfa_Jeops
-							ON Detail.Service_Order_Id = Cfa_Jeops.Service_Order_Id							  
-				) AS A 
-where dbo.trunc(Task_End_Time) >= @RB and dbo.trunc(Task_End_Time) <= @RE
-
-		    GROUP BY Customer_Order_Id
-				 , Service_Order_Id
-				 , Srvc_Order_Unit
-				 , Performer_Name
-				 , Task_Nid
-				 , Performer_Cfa_Task_Count
-				 , Cfa_Task_Count
-				 , Cfa_Jeop_Count
-				 , Task_Name
-				 , Task_Start_Time
-				 , Task_End_Time
-				 , Intvl_Bus_Hrs
-				 , Sla_Met
-				 , Data_Src_Cd
-				 , Min_Jeop_Open
-				 , Max_Jeop_Close
-				 , Adj_Jeop_Close
-				 , Jeop_Intvl
-				 , Adjusted_Intvl
-				 , Adjusted_Intvl_Sla_Met
-				 , Supervisor_Name
-				 , Sla
-				 , Sla_Status
-				 , Adjusted_Intvl_Sla_Status
-				 , Inventory_Design_Id
-				 , Net_Bus_Minutes
-				 , Bus_Minutes_Sla_Met_Int
-				 , Bus_Minutes_Sla_Met
-				 ,Net_Bus_Minutes_NoJeopTimeExcluded
-				 ,Bus_Minutes_SLA_Met_NoJeopExcluded_Int
-				 ,task_id
-
-
-truncate table report.offnet_ic_metrics
-
-
-insert into report.offnet_ic_metrics 
---insert into report.offnet_ic_metrics 
-(director, manager, manager_full_name, nt_login, nt_login_full_name, contractor_flag, gal_contractor_flag, non_EO_Contractor,mon,
-customer_order_id, service_order_id, srvc_order_unit, task_assignee, task_nid, cfa_task_count, performer_cfa_task_count, cfa_jeop_count,task_name, task_start_date, task_end_date, 
-net_business_minutes_raw, intvl_bus_hrs, sla_met, data_src_cd, jeop_start_time, Jeop_end_time, Adj_Jeop_end_time, Jeop_net_business_minutes, Jeop_intvl,Adjusted_intvl,
-Adjusted_intvl_sla_met, supervisor_name,sla, sla_status, adjusted_intvl_sla_status, inventory_design_id, net_bus_minutes, bus_minutes_sla_met_int, bus_minutes_sla_met, 
-net_bus_minutes_noJeoptimeexcluded,Bus_Minutes_SLA_Met_NoJeopExcluded_Int,task_id,task_source, business_unit,business_segment)
-
-select list.*,cast(BOM.task_end_time as date),bom.*,case when bom.data_src_cd = 'Flight Deck' then 'Flight Deck' else 'ASRI BPM' end as task_source,
-sfdc.bu_short business_unit, sfdc.bu_segment business_segment 
-from #bom bom 
-left join dbo.galcapture gal on bom.performer_name = gal.NT_LOGIN or bom.performer_name = gal.cuid
-left join #list list on List.NT_Login = gal.NT_LOGIN --bom.performer_name  
-left join dbo.k_mart_data_daily k on bom.SRVC_ORDER_UNIT = k.[srvc order unit]
-left outer join dbo.tbl_sfdc_account sfdc on k.[bus org id] = sfdc.BUS_ORG_ID	
-where list.nt_login is not null
-
-EXEC dbo.sp_jv_update 'usp_OffNet_CFA_IC_Metrics - Step 3',1;
+        RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
+  END CATCH
 
 END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
