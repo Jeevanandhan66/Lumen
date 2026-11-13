@@ -1,580 +1,1332 @@
 USE [SA_Staging]
 GO
-/****** Object:  StoredProcedure [dbo].[usp_related_orders_w_hybrids]    Script Date: 11/13/2026 12:30:32 PM ******/
+/****** Object:  StoredProcedure [report].[usp_gfs_waves_tasks_details]    Script Date: 11/13/2026 12:43:02 PM ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
 
 
-
-
-
-
-/*************************************************************************************************************************************
- Author:		Tammy Mead	(original code from Mike Davenport)
- Create date:	04/4/2018
- Description:	Table contains the Primary and Related Orders and Items, including Hybrid Orders.
-				Table is used in Waves reporting to provide the SOU and OMC SOU for lookup joins.
-				Note:  Replicating the logic for the tbl_nasd_wip_rel_hyb table created by Mike Davenport.  
-				Existing code is located in SA_STAGING - [dbo].[usp_tcd_action_order_buckets] 
+/************************************************************************************************************************************************************************
+ Author:		kgkoch (Ken Koch)
+ Create date:	2020-07-02
+ Description:	Transition embedded sql in GFS SSRS report, "GFS Waves Tasks.rdl", to a stored procedure that creates a table for the report to pull from.  (BIRA 6201)
  
- Ver	Date		Author			Desc
- --------------------------------------------------------------------------------------------------------------------------------------
- 1.0	03/22/2018	Tammy Mead		Created Proc
- 2.0	06/01/2020	kgkoch			Replicated Proc to add Completed Orders (from usp_related_wip_orders_w_hybrids to usp_related_orders_w_hybrids) BIRA 6201
- 2.1	10/08/2020	kgkoch			Add is_wip to enable retiring usp_related_wip_orders_w_hybrids & related_wip_orders_w_hybrids (BIRA 7691)
- 2.2    11/11/2024  Tewodros B      Input parameter value has been updated to NULL, & specify the job name in @vAgentJob, so the job & package name can appear in the 
-                                    monitoring board clearly.
- ************************************************************************************************************************************/
+ Ver		Date			Author			Desc
+ ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 1.0		2020-07-02		kgkoch			Created Proc and mod to add task_end_time, incl 'Completed' tasks, and to use new table, related_orders_w_hybrids (incl Installed).
+ 1.1		2020-12-15		kgkoch			Eliminate cast as numeric for task_id (#task_details_join) - causing error.
+ 1.2		2021-05-20		Chad Tj			Added new dep on load order details and change vw to tbl for m/l data
+ 1.3		2026-01-12		Madhu			TASK3966011 - Removed tbl_omc_assignment table as the data is stale due to OMC decom.
+*************************************************************************************************************************************************************************/
 
-ALTER PROC [dbo].[usp_related_orders_w_hybrids]  @Job_Name varchar(1000) = NULL 
+ALTER PROCEDURE [report].[usp_gfs_waves_tasks_details] @iAgentJob varchar(1000) = NULL
+
+--FOR TESTING: exec [report].[usp_gfs_waves_tasks_details]
 AS
-
 BEGIN
+	SET NOCOUNT ON;
 
-    DECLARE @ErrorLine		INT;
-    DECLARE @ErrorMessage	NVARCHAR(4000); 
-    DECLARE @ErrorSeverity	INT;
-    DECLARE @ErrorState		INT;
-	DECLARE @ErrorNumber	VARCHAR(100);
-	DECLARE @vOutputError	VARCHAR(MAX);
-	DECLARE @vAgentJob VARCHAR(1000) = isNull(@Job_Name,'BIRA_GFS_Waves_Report ('+HOST_NAME()+')');
+	--Declare a variable to handle the agent job NULL and apply the host name running if manual
+	DECLARE @vAgentJob VARCHAR(1000) = isNull(@iAgentJob,'Manual Run ('+HOST_NAME()+')');
+	DECLARE @vProcessName VARCHAR(200) = 'report_gfs_waves_tasks_details update';
 
-    DECLARE @vProcessName			VARCHAR(200) = 'usp_related_orders_w_hybrids';
-	DECLARE @vValidationErrCleared	VARCHAR(1) = (SELECT MIN(isNull(bira_cleared,'N')) FROM dbo.critical_data_validation_log WHERE content_area = 'usp_related_orders_w_hybrids');
-
-BEGIN TRY
-
---Log the start of the job
---Job is dependent on several SA_Staging tables and waits 120 minutes (see ref_job_dependency table for details)
-
-EXEC dbo.sp_jv_update	@reportName = @vProcessName
-					  , @updatetype = 0
-					  , @source_server = @@SERVERNAME
-					  , @source_job		= @vAgentJob;
-
---Pull tbl_storm_orders data into Temp table for performance
-IF OBJECT_ID('tempdb..#omc') IS NOT NULL
-	DROP TABLE #omc ;
-
-SELECT * 
-INTO #omc 
-FROM
-	(
-	SELECT order_number, service_order, srvc_order_unit, prod_type, prov_product, current_working_task, order_type, DATA_SRC_CD, CUST_COMMIT_DT,BANDWIDTH
-	FROM tbl_storm_orders  WITH (NOLOCK)
-	WHERE COALESCE(ORDER_TYPE,'KEEP') <> 'NOOP'	
-	GROUP BY order_number, service_order, srvc_order_unit, prod_type, prov_product, current_working_task, order_type, DATA_SRC_CD, CUST_COMMIT_DT,BANDWIDTH
-	) omc
-;
-
---Pull tbl_Storm_HybridOrders data into Temp table for performance
-IF OBJECT_ID('tempdb..#omc_hybrids') IS NOT NULL
-	DROP TABLE #omc_hybrids ;
-
-SELECT * 
-INTO #omc_hybrids
-FROM
-	(
-	SELECT HybridOrderID, SON, ONUM, HybridOESystem, HybridSON, HybridONum, HybridPCID, HybridStatus,CAST('No Value' as varchar(155)) as HybridSON_CASE
-	FROM tbl_Storm_HybridOrders  WITH (NOLOCK)
-	WHERE HybridStatus <> 'Cancelled'
-	GROUP BY HybridOrderID, SON, ONUM, HybridOESystem, HybridSON, HybridONum, HybridPCID, HybridStatus
-	) omc_hybrids
-;
---Update hybridSON_CASE value
-UPDATE #omc_hybrids
-SET HybridSON_CASE = CASE 
-		WHEN hybridOEsystem = 'level 3' AND left(hybridson, 2) = '1-'
-			THEN hybridPCID
-		WHEN hybridoesystem = 'level 3' AND len(hybridson) > 8 AND left(hybridson, 2) <> '55'
-			THEN left(hybridson, 8)
-		WHEN hybridOEsystem = 'level 3'
-			THEN hybridson
-		--------------------------ADDED NEXT TWO ROWS TO INCREASE HYBRIDS ON MANAGED ROUTERS------
-		WHEN hybridOEsystem = 'global crossing' AND charindex('/1/3', hybridSON) > 0
-			THEN left(hybridSON, 6) + '/3'
-		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) = 0
-			AND charindex('-', hybridSON) = 0 AND charindex('FRO', hybridSON) > 0
-			THEN left(hybridSON, charindex('FRO', hybridSON) - 1)
-		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) = 0 AND charindex('-', hybridSON) = 0
-			THEN hybridSON
-		WHEN hybridOEsystem = 'global crossing' AND charindex('-', hybridSON) = 0 AND charindex('/', hybridson) = 0
-			THEN left(hybridSON, charindex(' ', hybridSON) - 1)
-		WHEN hybridOEsystem = 'global crossing' AND charindex('-', hybridSON) = 0 AND charindex(' ', hybridson) > 0
-			AND charindex('/', hybridson) > 0 AND charindex('/', hybridson) > charindex(' ', hybridson)
-			THEN left(hybridSON, charindex(' ', hybridSON) - 1) + substring(hybridson, charindex('/', hybridson), 2)
-		WHEN hybridOEsystem = 'global crossing' AND charindex('-', hybridSON) = 0
-			AND charindex(' ', hybridson) > 0 AND charindex('/', hybridson) > 0
-			AND charindex('/', hybridson) < charindex(' ', hybridson)
-			THEN left(hybridSON, charindex('/', hybridSON) + charindex(' ', hybridson) - charindex('/', hybridson))
-		--------------------------ADDED NEXT ROW TO INCREASE HYBRIDS ON MANAGED ROUTERS-----------
-		WHEN hybridOEsystem = 'global crossing' AND charindex('1-3', hybridSON) > 0
-			THEN left(hybridSON, 6) + '/3'
-		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) = 0
-			THEN left(hybridSON, charindex('-', hybridSON) - 1)
-		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) - charindex('-', hybridSON) < 2
-			AND charindex(' ', hybridSON) > 0
-			THEN left(hybridSON, charindex(' ', hybridSON) - 1)
-		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) - charindex('-', hybridSON) >= 2
-			AND charindex('-', hybridSON) > 0
-			THEN left(hybridSON, charindex('-', hybridSON) - 1)
-		----------------------------ORANGE SPECIFIC-------------------------------------------------
-		WHEN hybridOEsystem = 'TW Telecom' AND charindex('cpo', hybridSON) > 0
-			THEN right(hybridSON, 7)
-		WHEN hybridOEsystem = 'TW Telecom' AND charindex('-', hybridSON) > 0 AND len(hybridson) > 7
-			THEN right(hybridSON, 7)
-		WHEN hybridOEsystem = 'TW Telecom' AND charindex('C#', hybridSON) > 0
-			THEN hybridSON 	
-		WHEN hybridOEsystem = 'TW Telecom' AND charindex('C#', hybridonum) > 0
-			THEN hybridonum 		
-		WHEN hybridOEsystem = 'TW Telecom' AND charindex('C#', hybridpcid) > 0
-			THEN hybridpcid 		
-		WHEN hybridOEsystem = 'TW Telecom' AND hybridson IS NULL 
-			THEN 'OES Case# ' + hybridpcid
-		WHEN hybridOEsystem = 'TW Telecom' AND len(hybridson) = 0
-			THEN 'OES Case# ' + hybridpcid
-		------------------------------------------------C# Specific-----------------------------------------------------
-		WHEN hybridOEsystem = 'Direct DE' AND charindex('C#', hybridonum) > 0
-			THEN hybridonum
-		WHEN hybridOEsystem = 'Direct DE' AND charindex('C#', hybridSON) > 0
-			THEN hybridSON
-		WHEN hybridOEsystem = 'Direct DE' AND charindex('C#', hybridpcid) > 0
-			THEN hybridpcid --		
-		WHEN hybridOEsystem = 'Direct DE' AND charindex('SR', hybridSON) > 0
-			THEN hybridonum
-		------------------------------------------------Reverse Direct DE Specific--------------------------------------
-		WHEN hybridOEsystem = 'Reverse Direct DE' AND left(hybridonum, 2) = '10'
-			THEN hybridonum
-		ELSE hybridSON
-		END;
-
---Rosetta Stone has relationship between the SOU and the OMC SOUs
---however, it is missing some children and I'm not sure why
---example:  select * from #rosetta_stone where SA_Mart_SOU = '1079665/28557112'  
---rosetta stone does not have the (child) order items, i.e. poi=1079665/28557105; oi=1079665/28557112
-
-IF OBJECT_ID('tempdb..#rosetta_stone') IS NOT NULL
-	DROP TABLE #rosetta_stone ;
-
-SELECT * 
-INTO #rosetta_stone 
-FROM
-	(
-	SELECT r.[Order Number] as order_number, r.SA_Mart_SOU, r.OMC_SOU
-	FROM tbl_rosetta_stone r  WITH (NOLOCK)
-	GROUP BY r.[Order Number], r.SA_Mart_SOU, r.OMC_SOU
-	) rs
-;
-
-DECLARE @mininstalleddate DATETIME = DATEADD(yy,-2,DATEADD(yy,DATEDIFF(yy,0,GETDATE()),0))  --first day of year before last year.
---DECLARE @mininstalleddate DATETIME = DATEADD(yy, DATEDIFF(yy, 0, GETDATE()), 0)  --first day of current year.
-DECLARE @maxinstalleddate DATETIME = getdate()
---PRINT @mininstalleddate
---PRINT @maxinstalleddate
-
-IF OBJECT_ID('tempdb..#kmart') IS NOT NULL
-	DROP TABLE #kmart ;
-
---Insert tbl_k_mart_daily_w_metasolv_and_latam into temp table for performance
-SELECT * 
-INTO #kmart
-FROM
-	(
-	SELECT [order number] AS order_number
-	,k.[srvc order unit] as srvc_order_unit
-	,k.[data src cd] AS source_system
-	,k.managed_srvcs_flag
-	,k.[gl product family name] AS product_family_name
-	,k.[cust commit dt] AS cust_commit_dt
-	,k.bandwidth_grp AS bandwidth
-	,k.[sales_region] AS sales_region
-	,k.unified_mrr
-	,k.[product instance id] as product_instance_id
-	,k.functional_group
-	,case when
-		k.pending_installed_ind = 1
-		and k.[orig srvc order unit] IS NOT NULL
-		and k.[completed dt] is null
-		then 1
-		else 0
-	end as is_wip
-	FROM tbl_k_mart_daily_w_metasolv_and_latam k WITH (NOLOCK) --k_mart_daily_w_metasolv_and_latam k WITH (NOLOCK)
-	WHERE CASE 
-		WHEN k.[installed dt] >= @mininstalleddate
-				AND k.[installed dt] < @maxinstalleddate
-			THEN 'Y'
-		WHEN k.[ord status] = 'Pending'
-			AND k.[installed dt] IS NULL
-			THEN 'Y'
-		ELSE 'N'
-		END = 'Y'
-	AND isNull(k.[ord status], 'X') <> '!Other'
-	and k.[orig srvc order unit] IS NOT NULL
-	) kmart
-;
+	-----------------------------
+	-- Process Start
+	-----------------------------
+	--Log Job Start with Server and Job Name included.  USE THIS ONE IF THE PROCEDURE IS CALLED FROM A JOB
+EXEC dbo.sp_jv_update
+ 		 @reportname = @vProcessName
+		,@updatetype = 0
+		,@source_server = @@SERVERNAME 
+		,@source_job = @vAgentJob
 
 
-IF OBJECT_ID('tempdb..#stage') IS NOT NULL
-	DROP TABLE #stage ;
+	TRUNCATE TABLE report.gfs_waves_tasks_details;
 
-SELECT * 
-INTO #stage
-FROM
-(
---GET THE RELATED ITEMS ON AN ORDER FROM related_order_items
-SELECT k.order_number
-	,roi.primary_order_item
-	,COALESCE(roi.order_item, k.srvc_order_unit) AS order_item
-	,COALESCE(rs.omc_sou, omc_so.service_order, omc_primary.srvc_order_unit, k.srvc_order_unit) AS omc_primary_order_item
-	,COALESCE(omc_so.srvc_order_unit, omc.srvc_order_unit, k.srvc_order_unit) AS OMC_order_item
-	,COALESCE(omc_so.service_order, omc.service_order, roi.order_item, k.srvc_order_unit) AS omc_service_order
-	,k.source_system
-	,k.managed_srvcs_flag
-	,k.product_family_name
-	,COALESCE(k.product_family_name, omc.PROV_PRODUCT) AS product
-	,COALESCE(omc.prod_type, omc.prov_product) AS prov_product
-	,omc.CURRENT_WORKING_TASK AS current_working_task
-	,k.cust_commit_dt
-	,k.bandwidth
-	,k.sales_region
-	,k.product_instance_id
-	,k.unified_mrr
-	,k.functional_group
-	,k.is_wip
-	,'related items' AS source
-	--If the parent and the child are the same value, the order item is the primary
-	,CASE 
-		WHEN roi.primary_order_item = COALESCE(roi.order_item, k.srvc_order_unit)
-			THEN CAST(1 AS BIT)
-		ELSE CAST(0 AS BIT)
-		END AS is_primary
-	--cast as date so it does not create duplicate rows for the time
-	,CAST(getdate() AS DATE) AS date_loaded
-FROM #kmart k --this table/view only has the parents
-	--Get the related items on the orders
-	LEFT OUTER JOIN related_order_items roi WITH (NOLOCK) ON roi.primary_order_item = k.srvc_order_unit
-	--Get the OMC SOU
-	LEFT OUTER JOIN #rosetta_stone rs ON rs.SA_Mart_SOU = roi.primary_order_item
-		AND rs.order_number = k.order_number
-	--GET the OMC SOU for those not found in the rosetta stone table
-	LEFT OUTER JOIN #omc omc ON omc.SRVC_ORDER_UNIT = roi.order_item
-	--GET the OMC SOU by Service Order
-	LEFT OUTER JOIN #omc omc_SO ON omc_SO.service_order = COALESCE(roi.order_item, k.srvc_order_unit)
-	--GET the OMC SOU for the primary order item
-	LEFT OUTER JOIN #omc omc_primary ON omc_primary.SRVC_ORDER_UNIT = roi.primary_order_item
+	BEGIN TRY	--STORED PROCEDURE BODY BEGIN
 
-UNION
-
---GET THE RELATED ORDERS FROM tbl_cods_order_relationship  
-SELECT k.order_number
-	,r.parent_serv_order_nbr AS primary_order_item
-	,COALESCE(r.child_serv_order_nbr, k.srvc_order_unit) AS order_item
-	,COALESCE(rs.omc_sou, omc_so.service_order, omc_primary.srvc_order_unit, k.srvc_order_unit) AS omc_primary_order_item
-	,COALESCE(omc_so.srvc_order_unit, omc.srvc_order_unit, k.srvc_order_unit) AS OMC_order_item
-	,COALESCE(omc_so.service_order, omc.service_order, r.child_serv_order_nbr, k.srvc_order_unit) AS omc_service_order
-	,k.source_system
-	,k.managed_srvcs_flag
-	,k.product_family_name
-	,COALESCE(k.product_family_name, omc.PROV_PRODUCT) AS product
-	,COALESCE(omc.prod_type, omc.prov_product) AS prov_product
-	,omc.CURRENT_WORKING_TASK AS current_working_task
-	,k.cust_commit_dt
-	,k.bandwidth
-	,k.sales_region
-	,k.product_instance_id
-	,k.unified_mrr
-	,k.functional_group
-	,k.is_wip
-	,'related orders' AS source
-	--If the parent and the child are the same value, the order item is the primary
-	,CASE 
-		WHEN r.parent_serv_order_nbr = COALESCE(r.child_serv_order_nbr, k.srvc_order_unit)
-			THEN CAST(1 AS BIT)
-		ELSE CAST(0 AS BIT)
-		END AS is_primary
-	--cast as date so it does not create duplicate rows for the time
-	,CAST(getdate() AS DATE) AS date_loaded
-FROM #kmart k --vw_k_mart_daily_w_metasolv_latam only has the parent
---Get the related orders
-	LEFT OUTER JOIN tbl_cods_order_relationship r WITH (NOLOCK) ON r.parent_serv_order_nbr = k.srvc_order_unit
-	--Get the OMC SOU
-	LEFT OUTER JOIN #rosetta_stone rs ON rs.SA_Mart_SOU = r.parent_serv_order_nbr
-		AND rs.order_number = k.order_number
-	--GET the OMC SOU for those not found in the rosetta stone table
-	LEFT OUTER JOIN #omc omc ON omc.SRVC_ORDER_UNIT = r.child_serv_order_nbr
-	--added for Pipeline, ex: ORDER0646771
-	LEFT OUTER JOIN #omc omc_SO ON omc_SO.service_order = COALESCE(r.child_serv_order_nbr, k.srvc_order_unit)
-	--GET the OMC SOU for the primary order item
-	LEFT OUTER JOIN #omc omc_primary ON omc_primary.SRVC_ORDER_UNIT = r.parent_serv_order_nbr
-WHERE r.parent_serv_order_nbr IS NOT NULL
-	AND r.parent_serv_order_nbr <> r.child_serv_order_nbr --only get the children
-
-UNION
-
---GET THE RELATED ORDERS FROM tbl_cods_order_relationship - Flips the Child to be the Parent so both relationships exist in the table
-SELECT k.order_number
-	,r.child_serv_order_nbr AS primary_order_item
-	,r.parent_serv_order_nbr AS order_item
-	,COALESCE(rs.omc_sou, omc_so.service_order, omc_primary.srvc_order_unit, k.srvc_order_unit) AS omc_primary_order_item
-	,COALESCE(omc_so.srvc_order_unit, omc.srvc_order_unit, k.srvc_order_unit) AS OMC_order_item
-	,COALESCE(omc_so.service_order, omc.service_order, r.child_serv_order_nbr, k.srvc_order_unit) AS omc_service_order
-	,k.source_system
-	,k.managed_srvcs_flag
-	,k.product_family_name
-	,COALESCE(k.product_family_name, omc.PROV_PRODUCT) AS product
-	,COALESCE(omc.prod_type, omc.prov_product) AS prov_product
-	,omc.CURRENT_WORKING_TASK AS current_working_task
-	,k.cust_commit_dt
-	,k.bandwidth
-	,k.sales_region
-	,k.product_instance_id
-	,k.unified_mrr
-	,k.functional_group
-	,k.is_wip
-	,'related orders' AS source
-	--If the parent and the child are the same value, the order item is the primary
-	,CASE 
-		WHEN r.parent_serv_order_nbr = COALESCE(r.child_serv_order_nbr, k.srvc_order_unit)
-			THEN CAST(1 AS BIT)
-		ELSE CAST(0 AS BIT)
-		END AS is_primary
-	--cast as date so it does not create duplicate rows for the time
-	,CAST(getdate() AS DATE) AS date_loaded
-from #kmart k WITH (NOLOCK)						
-	inner join tbl_cods_order_relationship r WITH (NOLOCK) ON k.srvc_order_unit = r.child_serv_order_nbr									
-	--Get the OMC SOU
-	LEFT OUTER JOIN #rosetta_stone rs ON rs.SA_Mart_SOU = r.child_serv_order_nbr
-		AND rs.order_number = k.order_number
-	--GET the OMC SOU for those not found in the rosetta stone table
-	LEFT OUTER JOIN #omc omc ON omc.SRVC_ORDER_UNIT = r.parent_serv_order_nbr
-	LEFT OUTER JOIN #omc omc_SO ON omc_SO.service_order = COALESCE(r.parent_serv_order_nbr, k.srvc_order_unit)
-	--GET the OMC SOU for the primary order item
-	LEFT OUTER JOIN #omc omc_primary ON omc_primary.SRVC_ORDER_UNIT = r.child_serv_order_nbr
-WHERE r.child_serv_order_nbr IS NOT NULL
-	AND r.parent_serv_order_nbr <> r.child_serv_order_nbr --only get the children
-
-) stage;
-
---Insert Related Items and Related Orders into table, then get Hybrid Orders
-TRUNCATE TABLE related_orders_w_hybrids
-
-INSERT INTO related_orders_w_hybrids
-SELECT
-	  order_number
-      ,primary_order_item
-      ,order_item
-      ,OMC_primary_order_item
-      ,OMC_order_item
-	  ,OMC_service_order
-      ,source_system
-	  ,unified_mrr
-	  ,managed_srvcs_flag
-      ,product_family_name
-      ,product
-      ,prov_product
-	  ,product_instance_id
-	  ,functional_group
-      ,current_working_task
-      ,cust_commit_dt
-      ,bandwidth
-      ,sales_region
-	  --remove duplicates if found in both related items and related orders tables
-      ,min(source) as source
-	  ,is_primary
-	  ,is_wip
-      ,date_loaded
---INTO related_orders_w_hybrids   -- to create initial table
-  FROM #stage
-  GROUP BY order_number
-      ,primary_order_item
-      ,order_item
-      ,OMC_primary_order_item
-      ,OMC_order_item
-	  ,OMC_service_order
-      ,source_system
-	  ,unified_mrr
-      ,managed_srvcs_flag
-      ,product_family_name
-      ,product
-      ,prov_product
-	  ,product_instance_id
-	  ,functional_group
-      ,current_working_task
-      ,cust_commit_dt
-      ,bandwidth
-      ,sales_region
-	  ,is_primary
-	  ,is_wip
-      ,date_loaded
+	DECLARE @p_hist_dt DATETIME = dbo.trunc(getdate())
 
 
--- FIND HYBRID ORDERS 
---1st SQL	JOIN ON h.omc_order_item = ho.son										
---2nd SQL	JOIN ON h.OMC_primary_order_item = ho.son
---3rd SQL	JOIN ON h.OMC_order_item = ho.onum										
-											
-if object_id('tempdb..#hybrids') is not null											
-	drop table #hybrids;										
+IF OBJECT_ID('tempdb..#tasklist') IS NOT NULL
+	DROP TABLE #tasklist;
+
+SELECT DISTINCT task_name
+INTO #tasklist
+FROM task_details WITH (NOLOCK)
+WHERE task_source = 'BPM'
+	AND TASK_NAME LIKE '%test%assist%'
+
+INSERT INTO #tasklist
+VALUES ('InstallCrossConnect')
+	,('InstallPreWireTransport')
+	,('LOA/CFA Process Field Install')
+	,('install_equipment')
+	,('Install Equipment')
+	,('Service Validate Field')
+	,('Service Validate Field - Uncoordinated')
+
+--select * from #tasklist
+IF object_id('tempdb..#related_ords') IS NOT NULL
+	DROP TABLE #related_ords;
+
 SELECT *
-INTO #hybrids
+INTO #related_ords
+FROM related_orders_w_hybrids WITH (NOLOCK);
+
+IF object_id('tempdb..#sou_limit') IS NOT NULL
+	DROP TABLE #sou_limit;
+
+SELECT DISTINCT
+	k.order_item AS srvc_order_unit
+	,k.primary_order_item AS orig_srvc_order_unit
+	,k.unified_mrr AS mrr
+	,k.customer_commit_dt as cust_commit_dt
+	,k.prov_product as product_instance_id
+	,k.source_system
+	,'N' as cnr_flag --k.cnr_flag
+	--,w.OMC_SOU
+	,omc.OMC_SOU
+	,k.product
+	,k.product_family_name
+	--,w.tester
+	,omc.tester
+	,k.order_number
+	,w.[net ind] AS net_ind
+	,w.[business org name] AS business_org_name
+	,w.[cust req dt] AS cust_req_dt
+	--,w.ccm
+	--,omc.ccm
+	,w.ccm_login as ccm
+	--,w.CCMMngr
+	,CCMMngr = isnull(d.mgr_nt_login,'Unknown')
+	--,w.functional_group
+	,case when	w.[prod type] = 'Level3 Waves Service' or w.bandwidth_grp in ('10G','10GE','2.5G') then 'Wave'
+		when	w.[prov product] = 'EPL' then 'EPL'
+		when	w.[prov family] = 'IP' then 'IP'
+		when	w.[prov family] in ('Softswitch','Softswtich') then 'Voice'
+		when	w.[prov product] like '%IP%' or  w.[prov product] = 'Internet' then 'IP'
+		when	w.[prov family] in ('Dark Fiber','Gateway') then 'Infra'
+		when	w.[prov product] = 'Private Room' then 'Infra'
+		when	w.[prov product] like '%voice%' or  w.[prov product] = 'Trunk Group' or	w.[prov product] like '%POTS%' then 'Voice'
+		when	w.[prov family] in ('Transport','DAL','CDN') then 'PL'
+		when	w.[prov family] = 'Crossconnect' or	w.[prov product] = 'CrossConnect Bulk Cable' then 'XC'
+		else 'Other'				
+	end functional_group
+	--,w.provmngr
+	,provmngr = isnull(e.mgr_nt_login,'Unknown')
+	,w.[orig cust commit dt rpt] AS orig_cust_commit_dt_rpt
+	,k.bandwidth
+	,w.sales_region
+	,w.operating_region_cd
+INTO #sou_limit
+FROM #related_ords k WITH (NOLOCK)
+--LEFT OUTER JOIN vw_monthly_opportunity_combined_allregions w WITH (NOLOCK) ON k.order_item = w.[srvc order unit]
+LEFT OUTER JOIN tbl_k_mart_daily_w_metasolv_and_latam w WITH (NOLOCK) ON k.order_item = w.[srvc order unit]
+left outer join dbo.CSD_IC_Employee d on w.ccm_login = d.nt_login and d.retired = 'n'
+left join (
+	SELECT
+		 [Srvc Order Unit]
+		,MAX(OMC_SOU) AS OMC_SOU
+		,MAX(Provisioner) AS Provisioner
+		,MAX(Tester) AS Tester
+		--,MAX(CCM) AS CCM
+	FROM sa_staging.dbo.xref_order_assignees with (nolock)
+	GROUP BY [Srvc Order Unit]) omc ON k.order_item = omc.[srvc order unit]
+--left outer join dbo.CSD_IC_Employee d on omc.ccm = d.nt_login and d.retired = 'n'
+left outer join dbo.CSD_IC_Employee e on omc.provisioner = e.nt_login and e.retired = 'n'
+
+WHERE
+	k.sales_region in ('NA','EMEA')
+	AND (k.product_family_name = 'wavelengths' OR k.functional_group = 'wave')
+	AND w.[gl product family name] <> 'Colocation'
+	AND isnull(w.long_term_customer_delay_flag, 'N') = 'N'
+	AND (
+		CASE 
+			WHEN w.Off_net_resp_org_name IS NOT NULL
+				AND charindex(':', w.Off_net_resp_org_name) = 0
+				THEN w.Off_net_resp_org_name
+			WHEN w.Off_net_resp_org_name IS NOT NULL
+				THEN left(w.Off_net_resp_org_name, charindex(':', w.Off_net_resp_org_name) - 1)
+			WHEN charindex(':', w.On_Net_resp_org_name) = 0
+				THEN w.On_Net_resp_org_name
+			ELSE left(w.On_Net_resp_org_name, charindex(':', w.On_Net_resp_org_name) - 1)
+			END IN (
+			'cti'
+			,'gfs'
+			,'cti waves'
+			)
+		OR CASE 
+			WHEN charindex(':', w.On_Net_resp_org_name) = 0
+				THEN w.On_Net_resp_org_name
+			ELSE left(w.On_Net_resp_org_name, charindex(':', w.On_Net_resp_org_name) - 1)
+			END IN ( 
+			'cti'
+			,'gfs'
+			,'cti waves'
+			)
+		)
+	AND (
+		w.On_Net_resp_org_name IS NULL
+		OR w.On_Net_resp_org_name <> 'CTI: Parked'
+		)
+	AND (
+		w.Off_net_resp_org_name IS NULL
+		OR w.Off_net_resp_org_name <> 'CTI: Parked'
+		)
+	AND k.customer_commit_dt IS NOT NULL
+	AND k.is_primary = 1
+
+--select * from #sou_limit where order_number  = '1-1496488514'
+IF OBJECT_ID('tempdb..#tsk_join_prep') IS NOT NULL
+	DROP TABLE #tsk_join_prep;
+
+SELECT *
+INTO #tsk_join_prep
 FROM (
---1st SQL:	JOIN ON h.omc_order_item = ho.son										
-	SELECT h.*
-		,ho.HybridSON_CASE AS hybridSON
-		,CASE 
-			WHEN charindex('C#', ho.hybridonum) > 0
-				OR charindex('C#', ho.hybridSON) > 0
-				THEN 'C#'
-			ELSE ho.hybridOEsystem
-			END AS hybridOEsystem
-		,ho.hybridonum
-		,ho.hybridpcid
-		,ho.hybridson AS hybridson_actual
-		,'OMC order item = son' AS subq
-	FROM related_orders_w_hybrids h  WITH (NOLOCK)
-	LEFT OUTER JOIN #omc_hybrids ho ON h.omc_order_item = ho.son
-	WHERE ho.son IS NOT NULL
+
+	SELECT w.primary_order_item
+		,w.order_item as task_order_item
+		,w.source
+		,w.source_system
+		,sl.sales_region
+		,sl.operating_region_cd
+		,1 AS subquery_id
+	FROM #related_ords w
+	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
+	WHERE w.omc_order_item IS NOT NULL
+
+	UNION
+	
+	SELECT w.primary_order_item
+		,w.OMC_service_order AS task_order_item
+		,w.source
+		,w.source_system
+		,sl.sales_region
+		,sl.operating_region_cd
+		,2 AS subquery_id
+	FROM #related_ords w
+	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
+	WHERE OMC_service_order IS NOT NULL
 	
 	UNION
 	
---2nd SQL:	JOIN ON h.OMC_primary_order_item = ho.son
-	SELECT h.*
-		,ho.HybridSON_CASE AS hybridSON
-		,CASE 
-			WHEN charindex('C#', ho.hybridonum) > 0
-				OR charindex('C#', ho.hybridSON) > 0
-				THEN 'C#'
-			ELSE ho.hybridOEsystem
-			END AS hybridOEsystem
-		,ho.hybridonum
-		,ho.hybridpcid
-		,ho.hybridson AS hybridson_actual
-		,'OMC primary_order_item = son' AS subq
-	FROM related_orders_w_hybrids h  WITH (NOLOCK)
-	LEFT OUTER JOIN #omc_hybrids ho ON h.OMC_primary_order_item = ho.son
-	WHERE ho.son IS NOT NULL
+	SELECT w.primary_order_item
+		,w.order_item AS task_order_item
+		,w.source
+		,w.source_system
+		,sl.sales_region
+		,sl.operating_region_cd
+		,3 AS subquery_id
+	FROM #related_ords w
+	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
+	WHERE w.order_item IS NOT NULL
+		AND w.source LIKE 'related%'
+		AND (
+			w.order_item <> omc_service_order
+			OR omc_service_order IS NULL
+			)
+		AND (w.order_item <> w.omc_order_item)
 	
 	UNION
 	
---3rd SQL:	JOIN ON h.OMC_order_item = ho.onum										
-	SELECT h.*
-		,ho.HybridSON_CASE AS hybridSON
-		,CASE 
-			WHEN charindex('C#', ho.hybridonum) > 0
-				OR charindex('C#', ho.hybridSON) > 0
-				THEN 'C#'
-			ELSE ho.hybridOEsystem
-			END AS hybridOEsystem
-		,ho.hybridonum
-		,ho.hybridpcid
-		,ho.hybridson AS hybridson_actual
-		,'OMC order item = onum' AS subq
-	FROM related_orders_w_hybrids h  WITH (NOLOCK)
-		LEFT OUTER JOIN #omc_hybrids ho ON h.OMC_order_item = ho.onum
-	WHERE ho.son IS NOT NULL
+	SELECT w.primary_order_item
+		,sl.product_instance_id AS task_order_item
+		,w.source
+		,sl.source_system
+		,sl.sales_region
+		,sl.operating_region_cd
+		,4 AS subquery_id
+	FROM #related_ords w
+	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = w.primary_order_item
+	WHERE sl.srvc_order_unit IS NOT NULL AND w.source NOT IN ('hybrid')
+	
+	UNION
+	
+	SELECT primary_order_item
+		,w.OMC_order_item --right(w.OMC_order_item, len(w.OMC_order_item) - 9) AS task_order_item
+		,w.source
+		,sl.source_system
+		,sl.sales_region
+		,sl.operating_region_cd
+		,5 AS subquery_id
+	FROM #related_ords w
+	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = primary_order_item
+	WHERE order_item IS NOT NULL
+		AND w.source_system = 'pipeline'
+		AND charindex('-', w.OMC_order_item) > 0
+		AND len(w.OMC_order_item) > 9
+	
+	UNION
+	
+	SELECT primary_order_item
+		,replace(primary_order_item, '/', '-') AS task_order_item
+		,w.source
+		,sl.source_system
+		,sl.sales_region
+		,sl.operating_region_cd
+		,6 AS subquery_id
+	FROM #related_ords w
+	INNER JOIN #sou_limit sl ON sl.srvc_order_unit = primary_order_item
+	WHERE order_item IS NOT NULL
+	
+	UNION
+	
+	SELECT primary_order_item
+		,k.[srvc order unit] AS task_order_item
+		,source
+		,w.source_system
+		,sl.sales_region
+		,sl.operating_region_cd
+		,7 AS subquery_id
+	FROM #related_ords w
+	INNER JOIN #sou_limit sl --UPDATE 004
+		ON sl.srvc_order_unit = primary_order_item
+	LEFT OUTER JOIN tbl_k_mart_daily_w_metasolv_and_latam k ON w.omc_service_order = k.[product instance id]
+	WHERE order_item IS NOT NULL
 	) a;
 
---Insert Hybrid rows into destination table - related_orders_w_hybrids
+--select * from #tsk_join_prep
+IF OBJECT_ID('tempdb..#task_details_join') IS NOT NULL
+	DROP TABLE #task_details_join;
 
-INSERT INTO related_orders_w_hybrids
-SELECT distinct
-	h.order_number
-	,h.primary_order_item
-	,h.order_item
-	,h.OMC_primary_order_item
-	,coalesce(so.srvc_order_unit, so2.srvc_order_unit, h.hybridSON) AS omc_order_item
-	,h.hybridSON AS OMC_service_order
-	,coalesce(k.source_system, so.data_src_cd, so2.data_src_cd, h.hybridOEsystem, h.source_system) AS source_system
-	,0 as unified_mrr
-	,h.managed_srvcs_flag
-	,h.product_family_name
-	,COALESCE(k.product_family_name, so.prov_product, so2.prov_product) AS product
-	,COALESCE(so.prod_type, so.prov_product, so2.prod_type, so2.prov_product) AS prov_product
-	,NULL as product_instance_id
-	,NULL as functional_group
-	,COALESCE(so.current_working_task, so2.current_working_task) AS current_working_task
-	,COALESCE(k.cust_commit_dt, so.CUST_COMMIT_DT, so2.CUST_COMMIT_DT) AS cust_commit_dt
-	,COALESCE(k.bandwidth, so.bandwidth, so2.bandwidth) AS bandwidth
-	,h.sales_region
+CREATE TABLE #task_details_join (
+	primary_order_item VARCHAR(256)
+	,task_order_item VARCHAR(256)
+	,source VARCHAR(16)
+	,sales_region VARCHAR(256)
+	,operating_region_cd VARCHAR(256)
+	,task_name VARCHAR(512)
+	,task_assignee VARCHAR(512)
+	,task_due_date DATETIME
+	,work_site_location VARCHAR(256)
+	,dispatch_gateway_CLLI VARCHAR(256)
+	,service_id VARCHAR(256)
+	--,task_id NUMERIC(38, 0)
+	,task_id VARCHAR(64)
+	,tsk_src VARCHAR(16)
+	,task_status VARCHAR(32)
+	,task_start_time DATETIME
+	,task_end_time DATETIME
+	,rownum INT
+	,dept VARCHAR(64)
+	,title VARCHAR(64)
+	,mgr VARCHAR(256)
+	)
+
+INSERT INTO #task_details_join
+SELECT DISTINCT b.*
+	,isnull(g1.dept_name, b.task_assignee) AS dept
+	,isnull(g1.job_title, b.task_assignee) AS title
+	,isnull(g1.supervisor_name, b.task_assignee) AS mgr
+FROM (
+	SELECT a.*
+		,row_number() OVER (
+			PARTITION BY task_id ORDER BY CASE 
+					WHEN source = 'related items'
+						THEN 1
+					WHEN source = 'related orders'
+						THEN 2
+					WHEN source = 'hybrid'
+						THEN 3
+					END
+				,primary_order_item desc
+				,isnull(task_due_date, '2099-12-31')
+			) AS rownum
+	FROM (
+		SELECT DISTINCT w.primary_order_item
+			,w.task_order_item
+			,w.source
+			,w.sales_region
+			,w.operating_region_cd
+			,CASE 
+				WHEN w.source = 'hybrid'
+					THEN 'Hybrid: ' + tsk.task_name
+				WHEN w.source LIKE 'related order%'
+					THEN 'Related: ' + tsk.task_name
+				ELSE tsk.task_name
+				END AS task_name
+			,CASE 
+				WHEN tsk.task_assignee = 'walsh.brian' THEN 'walsh.brian2' ELSE tsk.task_assignee END AS task_assignee
+			,tsk.task_due_date
+			,tsk.work_site_location
+			,tsk.dispatch_gateway_CLLI
+			,tsk.service_id
+			--,cast(tsk.task_id AS NUMERIC(38, 0)) AS task_id
+			,tsk.task_id
+			,'task_details' AS tsk_src
+			,tsk.cods_task_status AS task_status
+			,tsk.task_start_date
+			,tsk.task_end_date AS task_end_time
+		FROM task_details tsk WITH (NOLOCK)
+		INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.task_sou
+		INNER JOIN #tasklist tl	on tsk.task_name = tl.task_name
+		WHERE tsk.task_derived_status IN (
+				'Completed'
+				, 'In Progress'
+				, 'Manual Task'
+				, 'Pending')
+			AND (tsk.task_start_date IS NOT NULL OR tsk.task_assignee IS NOT NULL)
+			--AND w.source not in ('EON', 'GC_EON', 'Global Crossing')
+		) a
+	) b
+LEFT OUTER JOIN galcapture g1 WITH (NOLOCK) ON b.task_assignee = g1.nt_login
+WHERE rownum = 1
+
+--select * from #task_details_join
+IF OBJECT_ID('tempdb..#sel_jeop') IS NOT NULL
+	DROP TABLE #sel_jeop
+
+SELECT j.task_id
+	,j.jeopardy_raised_dt
+	,row_number() OVER (
+		PARTITION BY j.task_id ORDER BY j.jeopardy_raised_dt
+		) AS Jeop_raise_order
+	,j.jeopardy_nid
+	,row_number() OVER (
+		PARTITION BY j.task_id ORDER BY j.jeopardy_nid
+		) AS jeop_nid_order
+	,row_number() OVER (
+		PARTITION BY j.task_id ORDER BY CASE 
+				WHEN j.jeopardy_reason_cd = 'GFSINCDSGN'
+					OR j.short_description IN (
+						'Design Error/Incomplete'
+						,'Design Error/Inc'
+						)
+					THEN 0
+				ELSE 1
+				END
+			,j.jeopardy_nid DESC
+		) AS jeop__order
+INTO #sel_jeop
+FROM [CODS_Workflow__Jeopardy] j WITH (NOLOCK)
+INNER JOIN #task_details_join tsk WITH (NOLOCK) ON tsk.task_id = j.task_id
+	AND tsk.source <> 'Related'
+
+IF OBJECT_ID('tempdb..#SV_Tester') IS NOT NULL
+	DROP TABLE #SV_Tester
+
+SELECT DISTINCT w.primary_order_item
+	,tsk.task_assignee
+INTO #SV_Tester
+FROM task_details tsk
+INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.task_sou
+--		and w.source <> 'related'
+WHERE tsk.task_name IN (
+		'service validate'
+		,'service validate uni'
+		,'Service Validate UNI (Tester)'
+		)
+
+IF OBJECT_ID('tempdb..#sv_testers_concat') IS NOT NULL
+	DROP TABLE #sv_testers_concat
+
+SELECT t1.primary_order_item
+	,STUFF((
+			SELECT ', ' + task_assignee
+			FROM #SV_Tester t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+			ORDER BY primary_order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS testers
+INTO #sv_testers_concat
+FROM #SV_Tester t1
+GROUP BY t1.primary_order_item
+
+--select * from #SV_Tester
+IF OBJECT_ID('tempdb..#address') IS NOT NULL
+	DROP TABLE #address;
+
+SELECT a.*
+	,row_number() OVER (
+		PARTITION BY primary_order_item ORDER BY primary_order_item
+			,order_item
+		) AS UNI_NO
+	,gfs_a_city.REGION
+	,gfs_a_city.DIVISION
+INTO #address
+FROM (
+	SELECT DISTINCT wrh.primary_order_item
+		,wrh.order_item
+		,pl.onnet_ind
+		,line1_addr
+		,city_name
+		,state_cd
+		,postal_cd
+		,cop.cust_service_id
+	FROM #related_ords wrh
+	INNER JOIN #sou_limit r ON r.srvc_order_unit = wrh.primary_order_item
+		AND r.order_number = wrh.order_number
+	LEFT OUTER JOIN [tbl_CODS_PRODUCT_LOCATION] pl ON pl.serv_order_nbr = wrh.order_item
+	LEFT OUTER JOIN tbl_CODS_DSL_V_Customer_Order_Product cop ON wrh.order_item = cop.serv_order_nbr
+		AND cop.serv_order_active_ind = 'Y'
+	WHERE wrh.prov_product IN (
+			'uni'
+			,'wholesale uni'
+			)
+		AND cop.serv_order_action_typ IN (
+			'install'
+			,'change'
+			)
+		AND pl.endpnt_typ = 'Access A'
+	) a
+LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions_Cities] gfs_a_city ON gfs_a_city.city = a.CITY_NAME
+	AND gfs_a_city.STATE = a.STATE_CD;
+
+--select * from #address
+IF OBJECT_ID('tempdb..#srvc_id_2_gfs') IS NOT NULL
+	DROP TABLE #srvc_id_2_gfs;
+
+SELECT DISTINCT primary_order_item
+	,cust_service_id
+	,region
+	,division
+INTO #srvc_id_2_gfs
+FROM #address
+WHERE cust_service_id IS NOT NULL;
+
+--select * from #srvc_id_2_gfs
+IF OBJECT_ID('tempdb..#addr_concat') IS NOT NULL
+	DROP TABLE #addr_concat;
+
+SELECT t1.primary_order_item
+	,STUFF((
+			SELECT ', ' + order_item
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no = 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1
+	,STUFF((
+			SELECT ', ' + city_name
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no = 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_City
+	,STUFF((
+			SELECT ', ' + state_cd
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no = 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_ST
+	,STUFF((
+			SELECT ', ' + t2.line1_addr
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no = 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_Addr
+	,STUFF((
+			SELECT ', ' + t2.cust_service_id
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no = 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_1_ckt_id
+	,STUFF((
+			SELECT ', ' + order_item
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no > 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2
+	,STUFF((
+			SELECT ', ' + city_name
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no > 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_City
+	,STUFF((
+			SELECT ', ' + state_cd
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no > 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_ST
+	,STUFF((
+			SELECT ', ' + line1_addr
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no > 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_Addr
+	,STUFF((
+			SELECT ', ' + t2.cust_service_id
+			FROM #address t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.uni_no > 1
+			ORDER BY order_item
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS UNI_2_ckt_id
+INTO #addr_concat
+FROM #address t1
+GROUP BY t1.primary_order_item
+;
+
+IF OBJECT_ID('tempdb..#const') IS NOT NULL
+	DROP TABLE #const;
+
+SELECT DISTINCT w.srvc_order_unit
+	,ji.ownernt AS Jeop_owner
+	,jc.constraintid
+	,w.OMC_SOU
 	,CASE 
-		WHEN COALESCE(so.prod_type, so.prov_product, so2.prod_type, so2.prov_product) LIKE '%VPN%'
-			THEN 'ghost'
-		ELSE 'hybrid'
-		END AS source
-	,cast(0 AS BIT) AS is_primary
-	,h.is_wip
-	,h.date_loaded
-FROM #hybrids h
-	LEFT OUTER JOIN #omc so ON h.hybridson = so.SERVICE_ORDER
-	LEFT OUTER JOIN #omc so2 ON h.hybridson = so2.SRVC_ORDER_UNIT
-	LEFT OUTER JOIN #kmart k ---THIS MAY NEED TO BE VW_K_MART_DAILY_W_METASOLV_LATAM									
-		ON h.hybridSON = k.srvc_order_unit
-WHERE (	h.hybridOEsystem <> 'tw telecom' OR h.hybridoesystem IS NULL)
+		WHEN b.friendly_id IS NOT NULL
+			THEN b.masterclassgroup
+		ELSE jc.constrainttype
+		END AS constraint_type
+	,CASE 
+		WHEN b.friendly_id IS NOT NULL
+			THEN b.mastermadate
+		ELSE jc.dateclosed
+		END AS closed_dt
+	,jc.buildsystem
+	,jc.buildsystemid AS constraint_buildsystemid
+	,CASE 
+		WHEN b.friendly_id IS NOT NULL
+			THEN isnull(b.dcd, b.rdcd)
+		ELSE isnull(jc.dcd, jc.rdcd)
+		END AS latest_dcd_ncd
+INTO #const
+FROM #sou_limit w
+INNER JOIN (
+	SELECT DISTINCT [srvc order unit]
+		,constraintid
+		,buildsystemid
+	FROM [tbl_nasd_const2sous] WITH (NOLOCK)
+	) c ON w.srvc_order_unit = c.[srvc order unit]
+LEFT OUTER JOIN pnd.dbo.thenetbuildordercube b WITH (NOLOCK) ON c.buildsystemid = b.FRIENDLY_ID
+LEFT OUTER JOIN [dbo].[Tbl_Storm_jeopconstraints] jc WITH (NOLOCK) ON c.constraintid = jc.constraintid
+LEFT OUTER JOIN [dbo].[tbl_Storm_jeopinfo] ji WITH (NOLOCK) ON jc.jeopid = ji.jeopid;
 
-UNION
+IF OBJECT_ID('tempdb..#const_concat') IS NOT NULL
+	DROP TABLE #const_concat;
 
-SELECT distinct
-	h.order_number
-	,h.primary_order_item
-	,h.order_item
-	,h.OMC_primary_order_item
-	,so.srvc_order_unit AS omc_order_item
-	,h.hybridSON AS OMC_service_order
-	,coalesce(k.source_system, so.data_src_cd, h.hybridOEsystem, h.source_system) AS source_system
-	,0 as unified_mrr
-	,h.managed_srvcs_flag
-	,h.product_family_name
-	,COALESCE(k.product_family_name, so.prov_product) AS product
-	,so.prov_product AS prov_product
-	,NULL as product_instance_id
-	,NULL as functional_group
-	,so.current_working_task
-	,COALESCE(so.CUST_COMMIT_DT, k.cust_commit_dt) AS cust_commit_dt
-	,COALESCE(k.bandwidth, so.bandwidth) AS bandwidth
-	,h.sales_region
-	,'hybrid' AS source
-	,cast(0 AS BIT) AS is_primary
-	,h.is_wip
-	,h.date_loaded
-FROM #hybrids h
-	LEFT OUTER JOIN #omc so ON h.hybridson = so.ORDER_NUMBER
-	LEFT OUTER JOIN #kmart k 
-		ON so.SRVC_ORDER_UNIT = k.srvc_order_unit
-WHERE (h.hybridOEsystem IN ('tw telecom','Direct DE') 
-	--I'm not sure what this denotes
-	OR left(h.hybridson, 2) = '55');
+SELECT t1.srvc_order_unit
+	,STUFF((
+			SELECT ', ' + cast(t2.constraintID AS VARCHAR(16))
+			FROM #const t2
+			WHERE t2.srvc_order_unit = t1.srvc_order_unit
+				AND t2.closed_dt IS NULL
+			ORDER BY t2.constraintID
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Constraints
+	,STUFF((
+			SELECT ', ' + t2.Jeop_owner
+			FROM #const t2
+			WHERE t2.srvc_order_unit = t1.srvc_order_unit
+				AND t2.closed_dt IS NULL
+			ORDER BY t2.constraintID
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Constraint_Jeop_Owner
+	,STUFF((
+			SELECT ', ' + t2.constraint_type
+			FROM #const t2
+			WHERE t2.srvc_order_unit = t1.srvc_order_unit
+				AND t2.closed_dt IS NULL
+			ORDER BY t2.constraintID
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS Open_constraint_type
+	,STUFF((
+			SELECT ', ' + t2.buildsystem
+			FROM #const t2
+			WHERE t2.srvc_order_unit = t1.srvc_order_unit
+				AND t2.closed_dt IS NULL
+			ORDER BY t2.constraintID
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Const_buildsystem
+	,STUFF((
+			SELECT ', ' + t2.constraint_buildsystemid
+			FROM #const t2
+			WHERE t2.srvc_order_unit = t1.srvc_order_unit
+				AND t2.closed_dt IS NULL
+			ORDER BY t2.constraintID
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS Open_constraint_buildsystemid
+	,STUFF((
+			SELECT ', ' + convert(VARCHAR(16), t2.latest_dcd_ncd, 101)
+			FROM #const t2
+			WHERE t2.srvc_order_unit = t1.srvc_order_unit
+				AND t2.closed_dt IS NULL
+			ORDER BY t2.constraintID
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS Open_Constraint_latest_ncd
+	,STUFF((
+			SELECT ', ' + t2.omc_sou
+			FROM #const t2
+			WHERE t2.srvc_order_unit = t1.srvc_order_unit
+				AND t2.closed_dt IS NULL
+			ORDER BY t2.constraintID
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 2, '') AS Constraint_OMC_SOUs
+	,sum(CASE 
+			WHEN t1.closed_dt IS NULL
+				THEN 1
+			ELSE 0
+			END) AS Open_Const_Count
+INTO #const_concat
+FROM #const t1
+GROUP BY t1.srvc_order_unit;
+
+IF OBJECT_ID('tempdb..#maxNotes') IS NOT NULL
+	DROP TABLE #maxNotes;
+
+SELECT n.[SRVC_ORDER_UNIT]
+	,max(n.[ts]) AS ts
+INTO #maxNotes
+FROM [SA_Staging].[dbo].[tbl_storm_briefnote] n WITH (NOLOCK)
+INNER JOIN #sou_limit r ON r.omc_sou = n.[SRVC_ORDER_UNIT]
+GROUP BY n.[SRVC_ORDER_UNIT]
+
+IF OBJECT_ID('tempdb..#Notes') IS NOT NULL
+	DROP TABLE #Notes;
+
+SELECT n.[SRVC_ORDER_UNIT]
+	,n.[Note]
+INTO #notes
+FROM [tbl_storm_briefnote] n WITH (NOLOCK)
+RIGHT OUTER JOIN #maxnotes m ON n.ts = m.ts
+	AND n.[SRVC_ORDER_UNIT] = m.[SRVC_ORDER_UNIT];
+
+IF OBJECT_ID('tempdb..#offnet_tsk') IS NOT NULL
+	DROP TABLE #offnet_tsk;
+
+SELECT DISTINCT b.*
+	,isnull(g1.dept_name, b.task_assignee) AS Dept
+	,isnull(g1.job_title, b.task_assignee) AS title
+	,isnull(g1.supervisor_name, b.task_assignee) AS Mgr
+INTO #offnet_tsk
+FROM (
+	SELECT a.*
+		,row_number() OVER (
+			PARTITION BY primary_order_item
+			,task_name ORDER BY task_end_date DESC
+			) AS rownum
+	FROM (
+		SELECT DISTINCT w.primary_order_item
+			,w.task_order_item
+			,w.source
+			,w.sales_region
+			,w.operating_region_cd
+			,CASE 
+				WHEN w.source = 'hybrid'
+					THEN 'Hybrid: ' + tsk.task_name
+				WHEN w.source LIKE 'related order%'
+					THEN 'Related: ' + tsk.task_name
+				ELSE tsk.task_name
+				END AS task_name
+			,tsk.task_assignee
+			,tsk.task_end_date
+			,tsk.task_due_date
+			,tsk.task_id
+			,tsk.task_source
+			,CASE 
+				WHEN tsk.cods_task_status = 'COMPLETE'
+					OR tsk.task_derived_status = 'Completed'
+					THEN 1
+				ELSE 0
+				END AS offnet_task_status
+		FROM task_details tsk WITH (NOLOCK)
+		INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.task_sou
+		WHERE w.source_system NOT IN (
+				'eon'
+				,'gc_eon'
+				,'global crossing'
+				,'level 3'
+				,'siebel'
+				,'pipeline'
+				,'red'
+				,'reverse direct de'
+				)
+			AND (
+				tsk.task_start_date IS NOT NULL
+				OR tsk.task_assignee IS NOT NULL
+				)
+			AND tsk.task_name IN (
+				'offnet_create_and_send_order'
+				,'offnet_receive_complete'
+				,'offnet_fe_receive_foc'
+				)
+		
+		UNION
+		
+		SELECT w.primary_order_item
+			,w.task_order_item
+			,w.source
+			,w.sales_region
+			,w.operating_region_cd
+			,CASE 
+				WHEN w.source = 'hyb'
+					THEN 'Hybrid: ' + tsk.task_name
+				WHEN w.source LIKE 'related order%'
+					THEN 'Related: ' + tsk.task_name
+				ELSE tsk.task_name
+				END AS task_name
+			,tsk.performer_name
+			,CASE 
+				WHEN tsk.task_status = 'completed'
+					THEN tsk.task_end_time
+				ELSE NULL
+				END AS task_end_time
+			,tsk.task_end_time
+			,NULL AS task_id
+			,'tbl_workflow_tasks' AS tsk_src
+			,CASE 
+				WHEN task_status = 'completed'
+					THEN 1
+				ELSE 0
+				END AS offnet_task_status
+		FROM tbl_workflow_tasks tsk WITH (NOLOCK)
+		INNER JOIN #tsk_join_prep w ON w.task_order_item = tsk.srvc_order_unit
+		
+		WHERE tsk.bpm_process_type = 'OFFNET'
+			AND tsk.task_name IN (
+				'CreateASR'
+				,'InitiateASRManual'
+				,'InitiateASR'
+				,'CaptureFOC'
+				,'FOCNotification'
+				,'Follow Up'
+				)
+		) a
+	) b
+LEFT OUTER JOIN galcapture g1 ON b.task_assignee = g1.nt_login
+WHERE rownum = 1;
+
+--select * from #offnet_tsk
+IF OBJECT_ID('tempdb..#offnet_tsk_concat') IS NOT NULL
+	DROP TABLE #offnet_tsk_concat;
+
+SELECT t1.primary_order_item
+	,STUFF((
+			SELECT 'vbcrlf' + t2.task_name
+			FROM #offnet_tsk t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.offnet_task_status = 1
+			ORDER BY t2.task_end_date
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 6, '') AS completed_offnet_tasks
+	,STUFF((
+			SELECT 'vbcrlf' + convert(VARCHAR(10), t2.task_end_date, 101)
+			FROM #offnet_tsk t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.offnet_task_status = 1
+			ORDER BY t2.task_end_date
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 6, '') AS completed_offnet_tasks_dates
+	,STUFF((
+			SELECT 'vbcrlf' + t2.task_name
+			FROM #offnet_tsk t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.offnet_task_status = 0
+			ORDER BY t2.task_due_date
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 6, '') AS pending_offnet_tasks
+	,STUFF((
+			SELECT 'vbcrlf' + isnull(convert(VARCHAR(10), t2.task_due_date, 101), 'No due date')
+			FROM #offnet_tsk t2
+			WHERE t2.primary_order_item = t1.primary_order_item
+				AND t2.offnet_task_status = 0
+			ORDER BY t2.task_due_date
+			FOR XML PATH('')
+				,TYPE
+			).value('.', 'varchar(max)'), 1, 6, '') AS pending_offnet_tasks_due
+INTO #offnet_tsk_concat
+FROM #offnet_tsk t1
+GROUP BY t1.primary_order_item
+
+IF OBJECT_ID('tempdb..#details') IS NOT NULL
+	DROP TABLE #details;
+
+SELECT td.primary_order_item AS srvc_order_unit
+	,td.task_order_item AS task_sou
+	,td.task_name
+	,td.task_assignee
+	,td.task_due_date
+	,td.task_start_time
+	,td.task_end_time
+	,td.work_site_location
+	,td.source
+	,td.task_status
+	,cast(td.task_id AS VARCHAR(64)) AS task_id
+	,coalesce(CASE 
+			WHEN gfs.region = 'not found'
+				AND city.region IS NOT NULL
+				THEN city.region
+			WHEN addr.uni_2_city IS NULL
+				THEN coalesce(gfs.region, city.region, gfs_a_city.region)
+			ELSE isnull(gfs.region, city.region)
+			END, sid_gfs.region, 'Unknown') AS region --UPDATE 006
+	,coalesce(CASE 
+			WHEN gfs.division = 'not found'
+				AND city.division IS NOT NULL
+				THEN city.division
+			WHEN addr.uni_2_city IS NULL
+				THEN coalesce(gfs.division, city.division, gfs_a_city.division)
+			ELSE isnull(gfs.division, city.division)
+			END, sid_gfs.division, 'Unknown') AS division --UPDATE 006
+	--,coalesce(g.gfs_market, upper(x.market), tech_div.market) AS market
+	,coalesce(g.gfs_market, tech_div.market) AS market
+	,cwj.jeopardy_reason_cd
+	,cwj.short_description
+	,cwj.raised_by_performer_name
+	,cwj.jeopardy_raised_dt
+	,cwj.jeopardy_resolution_dt
+	,dbo.fn_getbusinessdaysnohol(cwj.jeopardy_raised_dt, dbo.trunc(getdate())) AS Jeop_age_BD
+	,cwj.resolved_by_performer_name
+	,replace(replace(replace(notes.[Note], CHAR(13), ' '), CHAR(10), ' '), CHAR(9), ' ') AS Last_Brief_Note
+	,sl.mrr
+	,sl.cust_commit_dt
+	,sl.product_instance_id
+	,sl.source_system
+	,sl.product_family_name
+	,sl.net_ind
+	,sl.business_org_name
+	,sl.cust_req_dt
+	,sl.ccm
+	,sl.CCMMngr
+	,sl.omc_sou
+	,sl.functional_group
+	,sl.provmngr
+	,sl.orig_cust_commit_dt_rpt
+	,sl.bandwidth
+	,sl.order_number
+	,sl.tester
+	,sl.sales_region
+	,sl.operating_region_cd
+	,cc.open_constraint_jeop_owner
+	,cc.open_constraints
+	,cc.open_constraint_type
+	,cc.open_const_buildsystem
+	,cc.open_constraint_buildsystemid
+	,cc.Open_Constraint_latest_ncd
+	,cc.Constraint_OMC_SOUs
+	,cc.Open_Const_Count
+	,addr.UNI_1
+	,addr.UNI_1_City
+	,addr.UNI_1_ST
+	,addr.UNI_1_Addr
+	,addr.UNI_1_ckt_id
+	,addr.UNI_2
+	,addr.UNI_2_City
+	,addr.UNI_2_ST
+	,addr.UNI_2_Addr
+	,addr.UNI_2_ckt_id
+	,test.testers AS order_testers
+INTO #details
+FROM #task_details_join td 
+LEFT OUTER JOIN #sou_limit sl ON td.primary_order_item = sl.srvc_order_unit
+LEFT OUTER JOIN (
+	SELECT right(nt_login, len(nt_login) - charindex('\', nt_login)) AS user_nt
+		,period
+		,loc_city
+		,loc_state
+	FROM [dbo].[GAL_Historical_Hierarchy] WITH (NOLOCK)
+	WHERE dbo.fn_displaymonth(period) = dbo.fn_displaymonth(getdate())
+	) eh ON td.task_assignee = eh.user_nt
+LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions_Cities] city ON city.city = eh.loc_city
+	AND city.STATE = eh.loc_state
+LEFT OUTER JOIN #sel_jeop sj WITH (NOLOCK) ON td.task_id = sj.task_id
+	AND sj.jeop__order = 1
+LEFT OUTER JOIN [CODS_Workflow__Jeopardy] cwj WITH (NOLOCK) ON td.task_id = cwj.task_id
+	AND sj.jeopardy_nid = cwj.jeopardy_nid
+	AND sj.jeop__order = 1
+LEFT OUTER JOIN #notes notes ON sl.omc_sou = notes.[SRVC_ORDER_UNIT]
+LEFT OUTER JOIN #const_concat cc ON cc.srvc_order_unit = td.primary_order_item
+LEFT OUTER JOIN #addr_concat addr ON td.primary_order_item = addr.primary_order_item
+LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions_Cities] gfs_a_city ON gfs_a_city.city = addr.uni_1_city
+	AND gfs_a_city.STATE = addr.uni_1_st
+LEFT OUTER JOIN [PND].[dbo].[NetBuildGFS_Regions] gfs ON gfs.CLLI = isnull(td.work_site_location, left(td.dispatch_gateway_clli, 8))
+LEFT OUTER JOIN #sv_testers_concat test ON test.primary_order_item = td.primary_order_item
+LEFT OUTER JOIN #srvc_id_2_gfs sid_gfs ON sid_gfs.primary_order_item = td.primary_order_item
+	AND sid_gfs.CUST_SERVICE_ID = td.service_id
+LEFT OUTER JOIN [tbl_gfs_site_mapping_2013] g WITH (NOLOCK) ON isnull(td.work_site_location, left(td.dispatch_gateway_clli, 8)) = g.clli_cd
+--LEFT OUTER JOIN pnd.dbo.xref_Planner_CLLIs x ON isnull(td.work_site_location, left(td.dispatch_gateway_clli, 8)) = x.building_clli
+LEFT OUTER JOIN pnd.dbo.xref_GFS_Tech_Division tech_div ON td.task_assignee = tech_div.nt_login
+
+--select * from #details
+IF OBJECT_ID('tempdb..#CEA_CUR') IS NOT NULL
+	DROP TABLE #CEA_CUR;
+
+SELECT cea.*
+	,CASE 
+		WHEN cea.VALUE = 1
+			THEN 'Y'
+		ELSE 'N'
+		END 'CEA Ind'
+INTO #CEA_CUR
+FROM tbl_SONData_CustomerEarlyAcceptance cea WITH (NOLOCK)
+INNER JOIN (
+	SELECT SRVC_ORDER_UNIT
+		,ORDER_NUMBER
+		,max(PK_ID) max_PK_ID
+	FROM tbl_SONData_CustomerEarlyAcceptance cea WITH (NOLOCK)
+	GROUP BY SRVC_ORDER_UNIT
+		,ORDER_NUMBER
+	) max ON cea.PK_ID = max.max_PK_ID;
+	;
+
+IF OBJECT_ID('tempdb..#CEADT') IS NOT NULL
+	DROP TABLE #CEADT;
+
+SELECT ceadt.*
+INTO #CEADT
+FROM tbl_SONData_CEADate ceadt WITH (NOLOCK)
+INNER JOIN (
+	SELECT SRVC_ORDER_UNIT
+		,ORDER_NUMBER
+		,max(PK_ID) max_PK_ID
+	FROM tbl_SONData_CEADate WITH (NOLOCK)
+	GROUP BY SRVC_ORDER_UNIT
+		,ORDER_NUMBER
+	) max ON ceadt.PK_ID = max.max_PK_ID;
+	;
+
+IF OBJECT_ID('tempdb..#CEA_MSTR') IS NOT NULL
+	DROP TABLE #CEA_MSTR;
+
+SELECT cea_cur.PK_ID CEA_PK_ID
+	,cea_cur.SRVC_ORDER_UNIT CEA_SOU
+	,cea_cur.ORDER_NUMBER CEA_ORDER_NUMBER
+	,cea_cur.UPDATED_BY_LOGIN CEA_UPDT_LOGIN
+	,cea_cur.TIMESTAMP CEA_TIMESTAMP
+	,cea_cur.[CEA Ind] CEA_Ind
+	,ceadt.pk_id CEADT_PK_ID
+	,ceadt.updated_by_login CEADT_UPDT_LOGIN
+	,ceadt.TIMESTAMP CEADT_TIMESTAMP
+	,ceadt.value CEADT_EARLY_DT
+	,primary_order_item
+	,wrh.order_number
+INTO #CEA_MSTR
+FROM #CEA_CUR cea_cur
+INNER JOIN #related_ords wrh ON wrh.order_item = cea_cur.SRVC_ORDER_UNIT
+	AND (
+		wrh.order_number = cea_cur.order_number
+		OR wrh.OMC_service_order = cea_cur.order_number
+		)
+LEFT OUTER JOIN #CEADT ceadt ON cea_cur.SRVC_ORDER_UNIT = ceadt.SRVC_ORDER_UNIT
+	AND cea_cur.ORDER_NUMBER = ceadt.ORDER_NUMBER
+WHERE cea_cur.[CEA Ind] = 'y'
+	AND ceadt.value IS NOT NULL
+
+IF OBJECT_ID('tempdb..#CEA') IS NOT NULL
+	DROP TABLE #CEA;
+
+SELECT primary_order_item
+	,CEA_SOU as order_item
+	,max(ceadt_early_dt) AS CEA_DT
+INTO #CEA
+FROM #CEA_MSTR
+GROUP BY primary_order_item, CEA_SOU;
+
+IF OBJECT_ID('tempdb..#max_jeop_notes') IS NOT NULL
+	DROP TABLE #max_jeop_notes
+
+SELECT CASE 
+		WHEN charindex('-', cwn.srvc_order_unit) < 3
+			THEN cwn.srvc_order_unit
+		ELSE LEFT(cwn.SRVC_ORDER_UNIT, charindex('-', cwn.SRVC_ORDER_UNIT) - 1)
+		END AS order_item
+	,task_id
+	,max(note_dt) max_note_dt
+INTO #max_jeop_notes
+FROM CODS_Workflow__Notes cwn
+INNER JOIN #sou_limit w ON w.srvc_order_unit = CASE 
+		WHEN charindex('-', cwn.SRVC_ORDER_UNIT) < 3
+			THEN cwn.SRVC_ORDER_UNIT
+		ELSE LEFT(cwn.SRVC_ORDER_UNIT, charindex('-', cwn.SRVC_ORDER_UNIT) - 1)
+		END
+WHERE task_id IS NOT NULL
+GROUP BY CASE 
+		WHEN charindex('-', cwn.srvc_order_unit) < 3
+			THEN cwn.SRVC_ORDER_UNIT
+		ELSE LEFT(cwn.srvc_order_unit, charindex('-', cwn.srvc_order_unit) - 1)
+		END
+	,task_id;
+
+IF OBJECT_ID('tempdb..#task_note') IS NOT NULL
+	DROP TABLE #task_note
+
+SELECT DISTINCT
+	MJN.order_item
+	,cwn.note_dt
+	,cwn.task_id
+	,cwn.NOTE_TEXT
+	,cwn.USER_NAME
+INTO #task_note
+FROM CODS_Workflow__Notes cwn WITH (NOLOCK)
+INNER JOIN #max_jeop_notes MJN ON MJN.TASK_ID = CWN.TASK_ID
+	AND CWN.NOTE_DT = MJN.max_note_dt;
+
+IF OBJECT_ID('tempdb..#PROV') IS NOT NULL
+	DROP TABLE #PROV;
+
+SELECT p.srvc_order_unit
+	,epi.order_item
+	,s.[service_order]
+	,s.prov_product
+	,s.srvc_order_unit AS omc_srvc_order_unit
+	,'Access Circuit ' + s.srvc_order_unit + CASE 
+		WHEN s.installed_dt IS NOT NULL
+			THEN ' Installed'
+		ELSE ' In Progress'
+		END AS Access
+	--,CASE WHEN p.source_system in ('swift','SWIFT (BPM)') THEN SP.prov_loginID ELSE  sop.prov_loginID END AS prov_loginID
+	--,CASE WHEN p.source_system in ('swift','SWIFT (BPM)') THEN SP.Provisioner_Manager ELSE gm.[NT_LOGIN] END AS PROV_MGR
+	,sop.prov_loginID AS prov_loginID
+	,gm.[NT_LOGIN] AS PROV_MGR
+INTO #PROV
+FROM #sou_limit p WITH (NOLOCK)
+LEFT OUTER JOIN tbl_EON_Primary_Items epi WITH (NOLOCK) ON p.srvc_order_unit = epi.primary_order_item --*****issue is here
+LEFT OUTER JOIN tbl_storm_orders s WITH (NOLOCK) ON isnull(epi.order_item, p.srvc_order_unit) = s.service_order
+LEFT OUTER JOIN Tbl_Storm_OrderProvisioner sop WITH (NOLOCK) ON s.srvc_order_unit = sop.srvc_order_unit
+LEFT OUTER JOIN GALCapture g WITH (NOLOCK) ON sop.prov_loginID = g.[NT_LOGIN]
+	AND g.nt_login IS NOT NULL
+LEFT OUTER JOIN GALCapture GM WITH (NOLOCK) ON G.[SUPERVISOR_NAME] = GM.[FULL_NAME]
+	AND gm.nt_login IS NOT NULL
+--LEFT JOIN(select p.prov_loginID, t.Provisioner_Manager, t.OMC_SOU
+--from tbl_OMC_Assignments t
+--inner join related_order_items r on t.OMC_SOU = r.primary_order_item
+--inner join Tbl_Storm_OrderProvisioner p on r.order_item = p.srvc_order_unit ) SP on SP.OMC_SOU = p.srvc_order_unit
+WHERE (	p.source_system = 'gc_eon' AND s.prov_product LIKE '%access circuit%')
+	OR (p.source_system = 'pipeline' AND s.circuit_status = 'access')
+	OR (p.source_system IN ('siebel','cpo','swift','SWIFT (BPM)')
+);
+
+-------------------------------------------TABLE INSERT------------------------------------------
+
+INSERT INTO report.gfs_waves_tasks_details
+	(srvc_order_unit
+	,omc_sou
+	,functional_group
+	,ccmmngr
+	,provmngr
+	,tester
+	,business_org_name
+	,cust_req_dt
+	,bandwidth_grp
+	,acity
+	,ast
+	,zcity
+	,zst
+	,last_brief_note
+	,task_name
+	,task_status
+	,task_start_time
+	,task_end_time
+	,task_due_date
+	,performer_name
+	,work_site_location
+	,task_id
+	,task_due_status
+	,gfs_market
+	,gfs_division
+	,gfs_region
+	,jeop_owner
+	,open_constraints
+	,constraint_omc_sous
+	,constraint_types
+	,constraint_buildsystems
+	,constraint_buildsystemids
+	,open_const_count
+	,const_max_latest_dcd
+	,jeopardy_reason_cd
+	,short_description
+	,raised_by_performer_name
+	,jeopardy_raised_dt
+	,jeopardy_resolution_dt
+	,resolved_by_performer_name
+	,task_note_date
+	,task_note_text
+	,note_user_name
+	,cust_early_accept_dt
+	,provisioner
+	,prov_mgr
+	,mrr
+	,product_family_name
+	,orig_cust_commit_dt_rpt
+	,cust_commit_dt
+	,completed_dt
+	,report_date
+	,sales_region
+	,operating_region
+	,bu_short
+	,bu_segment)
+
+	select DISTINCT
+	d.srvc_order_unit as srvc_order_unit
+	,d.omc_sou
+	,d.functional_group
+	,d.ccmmngr
+	,lower(d.provmngr) as provmngr
+	,lower(d.tester) as tester
+	,d.business_org_name
+	,d.cust_req_dt
+	,d.bandwidth as bandwidth_grp
+	,case when v.acity is null then k.aclli else v.acity end as acity
+	,case when v.ast is null then 'SWIFT' else v.ast end as ast
+	,case when v.zcity is null then k.zclli else v.zcity end as zcity
+	,case when v.zst is null then 'SWIFT' else v.zst end as zst
+	,d.last_brief_note
+	,d.task_name
+	,d.task_status
+	,d.task_start_time
+	,d.task_end_time
+	,d.task_due_date
+	,d.task_assignee as performer_name
+	,d.work_site_location
+	,d.task_id
+	,case 
+		when dbo.trunc(d.task_end_time) is not null and dbo.trunc(d.task_due_date) is not null
+			and dbo.trunc(d.task_end_time) <= dbo.trunc(d.task_due_date) 
+				then 'Due Date MET'
+		when dbo.trunc(d.task_end_time) is not null and dbo.trunc(d.task_due_date) is not null
+			and dbo.trunc(d.task_end_time) > dbo.trunc(d.task_due_date) 
+				then 'Due Date MISSED'
+		when dbo.trunc(d.task_end_time) is null and dbo.trunc(k.[completed dt]) is not null and dbo.trunc(d.task_due_date) is not null
+				THEN 'Task End Date MISSING'
+		when dbo.trunc(isnull(d.task_due_date, d.task_end_time)) < @p_hist_dt 
+				then 'Past Due'
+		when dbo.trunc(isnull(d.task_due_date, d.task_end_time)) = @p_hist_dt 
+				then 'Due Today'
+		when dbo.trunc(isnull(d.task_due_date, d.task_end_time)) > @p_hist_dt 
+				then 'Due Later'
+		else 'Verify Due Date'
+		end as task_due_status
+	,d.market as gfs_market
+	,d.division as gfs_division
+	,d.region as gfs_region
+	,d.open_constraint_jeop_owner as jeop_owner
+	,d.open_constraints
+	,d.constraint_omc_sous
+	,d.open_constraint_type as constraint_types
+	,d.open_const_buildsystem as constraint_buildsystems
+	,d.open_constraint_buildsystemid as constraint_buildsystemids
+	,d.open_const_count
+	,d.open_constraint_latest_ncd as const_max_latest_dcd
+	,d.jeopardy_reason_cd as jeopardy_reason_cd
+	,d.short_description as short_description
+	,d.raised_by_performer_name as raised_by_performer_name
+	,d.jeopardy_raised_dt as jeopardy_raised_dt
+	,d.jeopardy_resolution_dt as jeopardy_resolution_dt
+	,d.resolved_by_performer_name as resolved_by_performer_name
+	,cwn.note_dt as task_note_date
+	,replace(replace(replace(cwn.note_text, char(13), ' '), char(10), ' '), char(9), ' ') as task_note_text
+	,cwn.user_name as note_user_name
+	,cea.cea_dt as cust_early_accept_dt
+	,lower(p.prov_loginid) as provisioner
+	,lower(p_mgr.prov_mgr) as prov_mgr
+	--,CASE WHEN SOU.source_system in ('swift', 'SWIFT (BPM)') THEN p.prov_loginID ELSE lower(p.prov_loginID) END AS provisioner
+	--,CASE WHEN SOU.source_system in ('swift', 'SWIFT (BPM)') THEN p.PROV_MGR ELSE lower(p_mgr.PROV_MGR) END AS prov_mgr
+	,d.mrr as mrr
+	,d.product_family_name as product_family_name
+	,d.orig_cust_commit_dt_rpt as orig_cust_commit_dt_rpt
+	,d.cust_commit_dt as cust_commit_dt
+	,k.[completed dt] as completed_dt
+	,@p_hist_dt as report_date
+	,d.sales_region
+	,d.operating_region_cd as operating_region
+	,s.BU_SHORT
+	,s.bu_segment
+FROM #details d
+LEFT OUTER JOIN #offnet_tsk_concat ot ON d.srvc_order_unit = ot.primary_order_item
+LEFT OUTER JOIN #CEA cea ON d.srvc_order_unit = cea.order_item
+LEFT OUTER JOIN #task_note cwn WITH (NOLOCK) ON d.task_id = cast(cwn.task_id AS VARCHAR(64))
+LEFT OUTER JOIN [V_PROV_ORDER_ALL] v WITH (NOLOCK) ON d.srvc_order_unit = v.[SRVC_ORDER_UNIT]
+LEFT OUTER JOIN [k_mart_data_daily] k WITH (NOLOCK) ON d.srvc_order_unit = k.[srvc order unit]
+LEFT OUTER JOIN [Dbo].[TBL_SFDC_ACCOUNT] s WITH (NOLOCK) ON k.ULTIMATE_CUST_ID=s.Ultimate_Cust_Num
+LEFT OUTER JOIN #prov p on p.srvc_order_unit = d.srvc_order_unit
+LEFT OUTER JOIN #prov p_mgr on p_mgr.srvc_order_unit = d.srvc_order_unit
+--LEFT OUTER JOIN #sou_limit SOU on SOU.srvc_order_unit = p.srvc_order_unit
+--LEFT OUTER JOIN tbl_k_mart_daily_w_metasolv_and_latam ml on d.task_sou = ml.[srvc order unit]
 
 
-	--Log completion of the job in the job_validation table
-	EXECUTE dbo.sp_jv_update 'usp_related_orders_w_hybrids',1;
+
+
+--STORED PROCEDURE BODY END
+
+EXEC dbo.sp_jv_update 'report_gfs_waves_tasks_details update', 1 
+
 
 END TRY
 
---Error Logic
-	BEGIN CATCH
-        SET @ErrorNumber	= ERROR_NUMBER();
-		SET @ErrorLine		= ERROR_LINE();
-		SET @ErrorMessage	= ERROR_MESSAGE();
-		SET @ErrorSeverity	= ERROR_SEVERITY();
-		SET @ErrorState		= ERROR_STATE();
-		SET @vOutputError	= 'usp_related_orders_w_hybrids Error: Line '+CAST(@ErrorLine AS VARCHAR(10))+' -- '+CAST(@ErrorNumber AS varchar(10))+' - '+@ErrorMessage;
-		
-        EXEC dbo.sp_jv_update 
-                 @reportname=@vProcessName
-				,@updatetype=1
-				,@iErrorMessage=@vOutputError;
+-------------------------------------
+-- Catch Any Errors - Log Job Failure
+-------------------------------------
+BEGIN CATCH
 
-        PRINT 'Actual error number: ' + CAST(@ErrorNumber AS VARCHAR(10));
-        PRINT 'Actual line number: ' + CAST(@ErrorLine AS VARCHAR(10));
-	    PRINT 'ERR MSG: '+ CAST(@ErrorMessage AS VARCHAR(4000));
+    DECLARE @ErrorNumber	INT = ERROR_NUMBER();
+    DECLARE @ErrorLine		INT = ERROR_LINE();
+    DECLARE @ErrorMessage	NVARCHAR(4000) = ERROR_MESSAGE();
+    DECLARE @ErrorSeverity	INT = ERROR_SEVERITY();
+    DECLARE @ErrorState		INT = ERROR_STATE();
+	DECLARE @vOutputError	VARCHAR(MAX) = ' Error: Line '+CAST(@ErrorLine AS VARCHAR(10))+' -- '+CAST(@ErrorNumber AS varchar(10))+' - '+@ErrorMessage;
+ 
+    PRINT 'Actual error number: ' + CAST(@ErrorNumber AS VARCHAR(10));
+    PRINT 'Actual line number: ' + CAST(@ErrorLine AS VARCHAR(10));
+	PRINT 'ERR MSG: '+ CAST(@ErrorMessage AS VARCHAR(4000));
+
+    ------------------
+	--  Error Job   --
+    ------------------
+	EXEC dbo.sp_jv_update	@reportName = @vProcessName
+		    				, @updatetype = 1
+							, @iErrorMessage = @vOutputError;
   
-        RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
-		
-	END CATCH
+    RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
+END CATCH
+					 
+
 
 END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
