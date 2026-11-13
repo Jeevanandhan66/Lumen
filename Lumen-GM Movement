@@ -1,16 +1,581 @@
-%python
-df = (
-    spark.read
-         .option("header", "true")
-         .option("inferSchema", "true")
-         .csv("/Volumes/dev_landing_dlh_finance/finsight/stage/shared_dim_date.csv")
-)
+USE [SA_Staging]
+GO
+/****** Object:  StoredProcedure [dbo].[usp_related_orders_w_hybrids]    Script Date: 11/13/2026 12:30:32 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
 
 
-%python
-df.write \
-  .format("delta") \
-  .mode("overwrite") \
-  .saveAsTable("dev_udl_dlh_finance.finsight.sa_staging_shared_dim_date")
 
-select count(*) from dev_udl_dlh_finance.finsight.sa_staging_shared_dim_date
+
+
+
+/*************************************************************************************************************************************
+ Author:		Tammy Mead	(original code from Mike Davenport)
+ Create date:	04/4/2018
+ Description:	Table contains the Primary and Related Orders and Items, including Hybrid Orders.
+				Table is used in Waves reporting to provide the SOU and OMC SOU for lookup joins.
+				Note:  Replicating the logic for the tbl_nasd_wip_rel_hyb table created by Mike Davenport.  
+				Existing code is located in SA_STAGING - [dbo].[usp_tcd_action_order_buckets] 
+ 
+ Ver	Date		Author			Desc
+ --------------------------------------------------------------------------------------------------------------------------------------
+ 1.0	03/22/2018	Tammy Mead		Created Proc
+ 2.0	06/01/2020	kgkoch			Replicated Proc to add Completed Orders (from usp_related_wip_orders_w_hybrids to usp_related_orders_w_hybrids) BIRA 6201
+ 2.1	10/08/2020	kgkoch			Add is_wip to enable retiring usp_related_wip_orders_w_hybrids & related_wip_orders_w_hybrids (BIRA 7691)
+ 2.2    11/11/2024  Tewodros B      Input parameter value has been updated to NULL, & specify the job name in @vAgentJob, so the job & package name can appear in the 
+                                    monitoring board clearly.
+ ************************************************************************************************************************************/
+
+ALTER PROC [dbo].[usp_related_orders_w_hybrids]  @Job_Name varchar(1000) = NULL 
+AS
+
+BEGIN
+
+    DECLARE @ErrorLine		INT;
+    DECLARE @ErrorMessage	NVARCHAR(4000); 
+    DECLARE @ErrorSeverity	INT;
+    DECLARE @ErrorState		INT;
+	DECLARE @ErrorNumber	VARCHAR(100);
+	DECLARE @vOutputError	VARCHAR(MAX);
+	DECLARE @vAgentJob VARCHAR(1000) = isNull(@Job_Name,'BIRA_GFS_Waves_Report ('+HOST_NAME()+')');
+
+    DECLARE @vProcessName			VARCHAR(200) = 'usp_related_orders_w_hybrids';
+	DECLARE @vValidationErrCleared	VARCHAR(1) = (SELECT MIN(isNull(bira_cleared,'N')) FROM dbo.critical_data_validation_log WHERE content_area = 'usp_related_orders_w_hybrids');
+
+BEGIN TRY
+
+--Log the start of the job
+--Job is dependent on several SA_Staging tables and waits 120 minutes (see ref_job_dependency table for details)
+
+EXEC dbo.sp_jv_update	@reportName = @vProcessName
+					  , @updatetype = 0
+					  , @source_server = @@SERVERNAME
+					  , @source_job		= @vAgentJob;
+
+--Pull tbl_storm_orders data into Temp table for performance
+IF OBJECT_ID('tempdb..#omc') IS NOT NULL
+	DROP TABLE #omc ;
+
+SELECT * 
+INTO #omc 
+FROM
+	(
+	SELECT order_number, service_order, srvc_order_unit, prod_type, prov_product, current_working_task, order_type, DATA_SRC_CD, CUST_COMMIT_DT,BANDWIDTH
+	FROM tbl_storm_orders  WITH (NOLOCK)
+	WHERE COALESCE(ORDER_TYPE,'KEEP') <> 'NOOP'	
+	GROUP BY order_number, service_order, srvc_order_unit, prod_type, prov_product, current_working_task, order_type, DATA_SRC_CD, CUST_COMMIT_DT,BANDWIDTH
+	) omc
+;
+
+--Pull tbl_Storm_HybridOrders data into Temp table for performance
+IF OBJECT_ID('tempdb..#omc_hybrids') IS NOT NULL
+	DROP TABLE #omc_hybrids ;
+
+SELECT * 
+INTO #omc_hybrids
+FROM
+	(
+	SELECT HybridOrderID, SON, ONUM, HybridOESystem, HybridSON, HybridONum, HybridPCID, HybridStatus,CAST('No Value' as varchar(155)) as HybridSON_CASE
+	FROM tbl_Storm_HybridOrders  WITH (NOLOCK)
+	WHERE HybridStatus <> 'Cancelled'
+	GROUP BY HybridOrderID, SON, ONUM, HybridOESystem, HybridSON, HybridONum, HybridPCID, HybridStatus
+	) omc_hybrids
+;
+--Update hybridSON_CASE value
+UPDATE #omc_hybrids
+SET HybridSON_CASE = CASE 
+		WHEN hybridOEsystem = 'level 3' AND left(hybridson, 2) = '1-'
+			THEN hybridPCID
+		WHEN hybridoesystem = 'level 3' AND len(hybridson) > 8 AND left(hybridson, 2) <> '55'
+			THEN left(hybridson, 8)
+		WHEN hybridOEsystem = 'level 3'
+			THEN hybridson
+		--------------------------ADDED NEXT TWO ROWS TO INCREASE HYBRIDS ON MANAGED ROUTERS------
+		WHEN hybridOEsystem = 'global crossing' AND charindex('/1/3', hybridSON) > 0
+			THEN left(hybridSON, 6) + '/3'
+		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) = 0
+			AND charindex('-', hybridSON) = 0 AND charindex('FRO', hybridSON) > 0
+			THEN left(hybridSON, charindex('FRO', hybridSON) - 1)
+		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) = 0 AND charindex('-', hybridSON) = 0
+			THEN hybridSON
+		WHEN hybridOEsystem = 'global crossing' AND charindex('-', hybridSON) = 0 AND charindex('/', hybridson) = 0
+			THEN left(hybridSON, charindex(' ', hybridSON) - 1)
+		WHEN hybridOEsystem = 'global crossing' AND charindex('-', hybridSON) = 0 AND charindex(' ', hybridson) > 0
+			AND charindex('/', hybridson) > 0 AND charindex('/', hybridson) > charindex(' ', hybridson)
+			THEN left(hybridSON, charindex(' ', hybridSON) - 1) + substring(hybridson, charindex('/', hybridson), 2)
+		WHEN hybridOEsystem = 'global crossing' AND charindex('-', hybridSON) = 0
+			AND charindex(' ', hybridson) > 0 AND charindex('/', hybridson) > 0
+			AND charindex('/', hybridson) < charindex(' ', hybridson)
+			THEN left(hybridSON, charindex('/', hybridSON) + charindex(' ', hybridson) - charindex('/', hybridson))
+		--------------------------ADDED NEXT ROW TO INCREASE HYBRIDS ON MANAGED ROUTERS-----------
+		WHEN hybridOEsystem = 'global crossing' AND charindex('1-3', hybridSON) > 0
+			THEN left(hybridSON, 6) + '/3'
+		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) = 0
+			THEN left(hybridSON, charindex('-', hybridSON) - 1)
+		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) - charindex('-', hybridSON) < 2
+			AND charindex(' ', hybridSON) > 0
+			THEN left(hybridSON, charindex(' ', hybridSON) - 1)
+		WHEN hybridOEsystem = 'global crossing' AND charindex(' ', hybridSON) - charindex('-', hybridSON) >= 2
+			AND charindex('-', hybridSON) > 0
+			THEN left(hybridSON, charindex('-', hybridSON) - 1)
+		----------------------------ORANGE SPECIFIC-------------------------------------------------
+		WHEN hybridOEsystem = 'TW Telecom' AND charindex('cpo', hybridSON) > 0
+			THEN right(hybridSON, 7)
+		WHEN hybridOEsystem = 'TW Telecom' AND charindex('-', hybridSON) > 0 AND len(hybridson) > 7
+			THEN right(hybridSON, 7)
+		WHEN hybridOEsystem = 'TW Telecom' AND charindex('C#', hybridSON) > 0
+			THEN hybridSON 	
+		WHEN hybridOEsystem = 'TW Telecom' AND charindex('C#', hybridonum) > 0
+			THEN hybridonum 		
+		WHEN hybridOEsystem = 'TW Telecom' AND charindex('C#', hybridpcid) > 0
+			THEN hybridpcid 		
+		WHEN hybridOEsystem = 'TW Telecom' AND hybridson IS NULL 
+			THEN 'OES Case# ' + hybridpcid
+		WHEN hybridOEsystem = 'TW Telecom' AND len(hybridson) = 0
+			THEN 'OES Case# ' + hybridpcid
+		------------------------------------------------C# Specific-----------------------------------------------------
+		WHEN hybridOEsystem = 'Direct DE' AND charindex('C#', hybridonum) > 0
+			THEN hybridonum
+		WHEN hybridOEsystem = 'Direct DE' AND charindex('C#', hybridSON) > 0
+			THEN hybridSON
+		WHEN hybridOEsystem = 'Direct DE' AND charindex('C#', hybridpcid) > 0
+			THEN hybridpcid --		
+		WHEN hybridOEsystem = 'Direct DE' AND charindex('SR', hybridSON) > 0
+			THEN hybridonum
+		------------------------------------------------Reverse Direct DE Specific--------------------------------------
+		WHEN hybridOEsystem = 'Reverse Direct DE' AND left(hybridonum, 2) = '10'
+			THEN hybridonum
+		ELSE hybridSON
+		END;
+
+--Rosetta Stone has relationship between the SOU and the OMC SOUs
+--however, it is missing some children and I'm not sure why
+--example:  select * from #rosetta_stone where SA_Mart_SOU = '1079665/28557112'  
+--rosetta stone does not have the (child) order items, i.e. poi=1079665/28557105; oi=1079665/28557112
+
+IF OBJECT_ID('tempdb..#rosetta_stone') IS NOT NULL
+	DROP TABLE #rosetta_stone ;
+
+SELECT * 
+INTO #rosetta_stone 
+FROM
+	(
+	SELECT r.[Order Number] as order_number, r.SA_Mart_SOU, r.OMC_SOU
+	FROM tbl_rosetta_stone r  WITH (NOLOCK)
+	GROUP BY r.[Order Number], r.SA_Mart_SOU, r.OMC_SOU
+	) rs
+;
+
+DECLARE @mininstalleddate DATETIME = DATEADD(yy,-2,DATEADD(yy,DATEDIFF(yy,0,GETDATE()),0))  --first day of year before last year.
+--DECLARE @mininstalleddate DATETIME = DATEADD(yy, DATEDIFF(yy, 0, GETDATE()), 0)  --first day of current year.
+DECLARE @maxinstalleddate DATETIME = getdate()
+--PRINT @mininstalleddate
+--PRINT @maxinstalleddate
+
+IF OBJECT_ID('tempdb..#kmart') IS NOT NULL
+	DROP TABLE #kmart ;
+
+--Insert tbl_k_mart_daily_w_metasolv_and_latam into temp table for performance
+SELECT * 
+INTO #kmart
+FROM
+	(
+	SELECT [order number] AS order_number
+	,k.[srvc order unit] as srvc_order_unit
+	,k.[data src cd] AS source_system
+	,k.managed_srvcs_flag
+	,k.[gl product family name] AS product_family_name
+	,k.[cust commit dt] AS cust_commit_dt
+	,k.bandwidth_grp AS bandwidth
+	,k.[sales_region] AS sales_region
+	,k.unified_mrr
+	,k.[product instance id] as product_instance_id
+	,k.functional_group
+	,case when
+		k.pending_installed_ind = 1
+		and k.[orig srvc order unit] IS NOT NULL
+		and k.[completed dt] is null
+		then 1
+		else 0
+	end as is_wip
+	FROM tbl_k_mart_daily_w_metasolv_and_latam k WITH (NOLOCK) --k_mart_daily_w_metasolv_and_latam k WITH (NOLOCK)
+	WHERE CASE 
+		WHEN k.[installed dt] >= @mininstalleddate
+				AND k.[installed dt] < @maxinstalleddate
+			THEN 'Y'
+		WHEN k.[ord status] = 'Pending'
+			AND k.[installed dt] IS NULL
+			THEN 'Y'
+		ELSE 'N'
+		END = 'Y'
+	AND isNull(k.[ord status], 'X') <> '!Other'
+	and k.[orig srvc order unit] IS NOT NULL
+	) kmart
+;
+
+
+IF OBJECT_ID('tempdb..#stage') IS NOT NULL
+	DROP TABLE #stage ;
+
+SELECT * 
+INTO #stage
+FROM
+(
+--GET THE RELATED ITEMS ON AN ORDER FROM related_order_items
+SELECT k.order_number
+	,roi.primary_order_item
+	,COALESCE(roi.order_item, k.srvc_order_unit) AS order_item
+	,COALESCE(rs.omc_sou, omc_so.service_order, omc_primary.srvc_order_unit, k.srvc_order_unit) AS omc_primary_order_item
+	,COALESCE(omc_so.srvc_order_unit, omc.srvc_order_unit, k.srvc_order_unit) AS OMC_order_item
+	,COALESCE(omc_so.service_order, omc.service_order, roi.order_item, k.srvc_order_unit) AS omc_service_order
+	,k.source_system
+	,k.managed_srvcs_flag
+	,k.product_family_name
+	,COALESCE(k.product_family_name, omc.PROV_PRODUCT) AS product
+	,COALESCE(omc.prod_type, omc.prov_product) AS prov_product
+	,omc.CURRENT_WORKING_TASK AS current_working_task
+	,k.cust_commit_dt
+	,k.bandwidth
+	,k.sales_region
+	,k.product_instance_id
+	,k.unified_mrr
+	,k.functional_group
+	,k.is_wip
+	,'related items' AS source
+	--If the parent and the child are the same value, the order item is the primary
+	,CASE 
+		WHEN roi.primary_order_item = COALESCE(roi.order_item, k.srvc_order_unit)
+			THEN CAST(1 AS BIT)
+		ELSE CAST(0 AS BIT)
+		END AS is_primary
+	--cast as date so it does not create duplicate rows for the time
+	,CAST(getdate() AS DATE) AS date_loaded
+FROM #kmart k --this table/view only has the parents
+	--Get the related items on the orders
+	LEFT OUTER JOIN related_order_items roi WITH (NOLOCK) ON roi.primary_order_item = k.srvc_order_unit
+	--Get the OMC SOU
+	LEFT OUTER JOIN #rosetta_stone rs ON rs.SA_Mart_SOU = roi.primary_order_item
+		AND rs.order_number = k.order_number
+	--GET the OMC SOU for those not found in the rosetta stone table
+	LEFT OUTER JOIN #omc omc ON omc.SRVC_ORDER_UNIT = roi.order_item
+	--GET the OMC SOU by Service Order
+	LEFT OUTER JOIN #omc omc_SO ON omc_SO.service_order = COALESCE(roi.order_item, k.srvc_order_unit)
+	--GET the OMC SOU for the primary order item
+	LEFT OUTER JOIN #omc omc_primary ON omc_primary.SRVC_ORDER_UNIT = roi.primary_order_item
+
+UNION
+
+--GET THE RELATED ORDERS FROM tbl_cods_order_relationship  
+SELECT k.order_number
+	,r.parent_serv_order_nbr AS primary_order_item
+	,COALESCE(r.child_serv_order_nbr, k.srvc_order_unit) AS order_item
+	,COALESCE(rs.omc_sou, omc_so.service_order, omc_primary.srvc_order_unit, k.srvc_order_unit) AS omc_primary_order_item
+	,COALESCE(omc_so.srvc_order_unit, omc.srvc_order_unit, k.srvc_order_unit) AS OMC_order_item
+	,COALESCE(omc_so.service_order, omc.service_order, r.child_serv_order_nbr, k.srvc_order_unit) AS omc_service_order
+	,k.source_system
+	,k.managed_srvcs_flag
+	,k.product_family_name
+	,COALESCE(k.product_family_name, omc.PROV_PRODUCT) AS product
+	,COALESCE(omc.prod_type, omc.prov_product) AS prov_product
+	,omc.CURRENT_WORKING_TASK AS current_working_task
+	,k.cust_commit_dt
+	,k.bandwidth
+	,k.sales_region
+	,k.product_instance_id
+	,k.unified_mrr
+	,k.functional_group
+	,k.is_wip
+	,'related orders' AS source
+	--If the parent and the child are the same value, the order item is the primary
+	,CASE 
+		WHEN r.parent_serv_order_nbr = COALESCE(r.child_serv_order_nbr, k.srvc_order_unit)
+			THEN CAST(1 AS BIT)
+		ELSE CAST(0 AS BIT)
+		END AS is_primary
+	--cast as date so it does not create duplicate rows for the time
+	,CAST(getdate() AS DATE) AS date_loaded
+FROM #kmart k --vw_k_mart_daily_w_metasolv_latam only has the parent
+--Get the related orders
+	LEFT OUTER JOIN tbl_cods_order_relationship r WITH (NOLOCK) ON r.parent_serv_order_nbr = k.srvc_order_unit
+	--Get the OMC SOU
+	LEFT OUTER JOIN #rosetta_stone rs ON rs.SA_Mart_SOU = r.parent_serv_order_nbr
+		AND rs.order_number = k.order_number
+	--GET the OMC SOU for those not found in the rosetta stone table
+	LEFT OUTER JOIN #omc omc ON omc.SRVC_ORDER_UNIT = r.child_serv_order_nbr
+	--added for Pipeline, ex: ORDER0646771
+	LEFT OUTER JOIN #omc omc_SO ON omc_SO.service_order = COALESCE(r.child_serv_order_nbr, k.srvc_order_unit)
+	--GET the OMC SOU for the primary order item
+	LEFT OUTER JOIN #omc omc_primary ON omc_primary.SRVC_ORDER_UNIT = r.parent_serv_order_nbr
+WHERE r.parent_serv_order_nbr IS NOT NULL
+	AND r.parent_serv_order_nbr <> r.child_serv_order_nbr --only get the children
+
+UNION
+
+--GET THE RELATED ORDERS FROM tbl_cods_order_relationship - Flips the Child to be the Parent so both relationships exist in the table
+SELECT k.order_number
+	,r.child_serv_order_nbr AS primary_order_item
+	,r.parent_serv_order_nbr AS order_item
+	,COALESCE(rs.omc_sou, omc_so.service_order, omc_primary.srvc_order_unit, k.srvc_order_unit) AS omc_primary_order_item
+	,COALESCE(omc_so.srvc_order_unit, omc.srvc_order_unit, k.srvc_order_unit) AS OMC_order_item
+	,COALESCE(omc_so.service_order, omc.service_order, r.child_serv_order_nbr, k.srvc_order_unit) AS omc_service_order
+	,k.source_system
+	,k.managed_srvcs_flag
+	,k.product_family_name
+	,COALESCE(k.product_family_name, omc.PROV_PRODUCT) AS product
+	,COALESCE(omc.prod_type, omc.prov_product) AS prov_product
+	,omc.CURRENT_WORKING_TASK AS current_working_task
+	,k.cust_commit_dt
+	,k.bandwidth
+	,k.sales_region
+	,k.product_instance_id
+	,k.unified_mrr
+	,k.functional_group
+	,k.is_wip
+	,'related orders' AS source
+	--If the parent and the child are the same value, the order item is the primary
+	,CASE 
+		WHEN r.parent_serv_order_nbr = COALESCE(r.child_serv_order_nbr, k.srvc_order_unit)
+			THEN CAST(1 AS BIT)
+		ELSE CAST(0 AS BIT)
+		END AS is_primary
+	--cast as date so it does not create duplicate rows for the time
+	,CAST(getdate() AS DATE) AS date_loaded
+from #kmart k WITH (NOLOCK)						
+	inner join tbl_cods_order_relationship r WITH (NOLOCK) ON k.srvc_order_unit = r.child_serv_order_nbr									
+	--Get the OMC SOU
+	LEFT OUTER JOIN #rosetta_stone rs ON rs.SA_Mart_SOU = r.child_serv_order_nbr
+		AND rs.order_number = k.order_number
+	--GET the OMC SOU for those not found in the rosetta stone table
+	LEFT OUTER JOIN #omc omc ON omc.SRVC_ORDER_UNIT = r.parent_serv_order_nbr
+	LEFT OUTER JOIN #omc omc_SO ON omc_SO.service_order = COALESCE(r.parent_serv_order_nbr, k.srvc_order_unit)
+	--GET the OMC SOU for the primary order item
+	LEFT OUTER JOIN #omc omc_primary ON omc_primary.SRVC_ORDER_UNIT = r.child_serv_order_nbr
+WHERE r.child_serv_order_nbr IS NOT NULL
+	AND r.parent_serv_order_nbr <> r.child_serv_order_nbr --only get the children
+
+) stage;
+
+--Insert Related Items and Related Orders into table, then get Hybrid Orders
+TRUNCATE TABLE related_orders_w_hybrids
+
+INSERT INTO related_orders_w_hybrids
+SELECT
+	  order_number
+      ,primary_order_item
+      ,order_item
+      ,OMC_primary_order_item
+      ,OMC_order_item
+	  ,OMC_service_order
+      ,source_system
+	  ,unified_mrr
+	  ,managed_srvcs_flag
+      ,product_family_name
+      ,product
+      ,prov_product
+	  ,product_instance_id
+	  ,functional_group
+      ,current_working_task
+      ,cust_commit_dt
+      ,bandwidth
+      ,sales_region
+	  --remove duplicates if found in both related items and related orders tables
+      ,min(source) as source
+	  ,is_primary
+	  ,is_wip
+      ,date_loaded
+--INTO related_orders_w_hybrids   -- to create initial table
+  FROM #stage
+  GROUP BY order_number
+      ,primary_order_item
+      ,order_item
+      ,OMC_primary_order_item
+      ,OMC_order_item
+	  ,OMC_service_order
+      ,source_system
+	  ,unified_mrr
+      ,managed_srvcs_flag
+      ,product_family_name
+      ,product
+      ,prov_product
+	  ,product_instance_id
+	  ,functional_group
+      ,current_working_task
+      ,cust_commit_dt
+      ,bandwidth
+      ,sales_region
+	  ,is_primary
+	  ,is_wip
+      ,date_loaded
+
+
+-- FIND HYBRID ORDERS 
+--1st SQL	JOIN ON h.omc_order_item = ho.son										
+--2nd SQL	JOIN ON h.OMC_primary_order_item = ho.son
+--3rd SQL	JOIN ON h.OMC_order_item = ho.onum										
+											
+if object_id('tempdb..#hybrids') is not null											
+	drop table #hybrids;										
+SELECT *
+INTO #hybrids
+FROM (
+--1st SQL:	JOIN ON h.omc_order_item = ho.son										
+	SELECT h.*
+		,ho.HybridSON_CASE AS hybridSON
+		,CASE 
+			WHEN charindex('C#', ho.hybridonum) > 0
+				OR charindex('C#', ho.hybridSON) > 0
+				THEN 'C#'
+			ELSE ho.hybridOEsystem
+			END AS hybridOEsystem
+		,ho.hybridonum
+		,ho.hybridpcid
+		,ho.hybridson AS hybridson_actual
+		,'OMC order item = son' AS subq
+	FROM related_orders_w_hybrids h  WITH (NOLOCK)
+	LEFT OUTER JOIN #omc_hybrids ho ON h.omc_order_item = ho.son
+	WHERE ho.son IS NOT NULL
+	
+	UNION
+	
+--2nd SQL:	JOIN ON h.OMC_primary_order_item = ho.son
+	SELECT h.*
+		,ho.HybridSON_CASE AS hybridSON
+		,CASE 
+			WHEN charindex('C#', ho.hybridonum) > 0
+				OR charindex('C#', ho.hybridSON) > 0
+				THEN 'C#'
+			ELSE ho.hybridOEsystem
+			END AS hybridOEsystem
+		,ho.hybridonum
+		,ho.hybridpcid
+		,ho.hybridson AS hybridson_actual
+		,'OMC primary_order_item = son' AS subq
+	FROM related_orders_w_hybrids h  WITH (NOLOCK)
+	LEFT OUTER JOIN #omc_hybrids ho ON h.OMC_primary_order_item = ho.son
+	WHERE ho.son IS NOT NULL
+	
+	UNION
+	
+--3rd SQL:	JOIN ON h.OMC_order_item = ho.onum										
+	SELECT h.*
+		,ho.HybridSON_CASE AS hybridSON
+		,CASE 
+			WHEN charindex('C#', ho.hybridonum) > 0
+				OR charindex('C#', ho.hybridSON) > 0
+				THEN 'C#'
+			ELSE ho.hybridOEsystem
+			END AS hybridOEsystem
+		,ho.hybridonum
+		,ho.hybridpcid
+		,ho.hybridson AS hybridson_actual
+		,'OMC order item = onum' AS subq
+	FROM related_orders_w_hybrids h  WITH (NOLOCK)
+		LEFT OUTER JOIN #omc_hybrids ho ON h.OMC_order_item = ho.onum
+	WHERE ho.son IS NOT NULL
+	) a;
+
+--Insert Hybrid rows into destination table - related_orders_w_hybrids
+
+INSERT INTO related_orders_w_hybrids
+SELECT distinct
+	h.order_number
+	,h.primary_order_item
+	,h.order_item
+	,h.OMC_primary_order_item
+	,coalesce(so.srvc_order_unit, so2.srvc_order_unit, h.hybridSON) AS omc_order_item
+	,h.hybridSON AS OMC_service_order
+	,coalesce(k.source_system, so.data_src_cd, so2.data_src_cd, h.hybridOEsystem, h.source_system) AS source_system
+	,0 as unified_mrr
+	,h.managed_srvcs_flag
+	,h.product_family_name
+	,COALESCE(k.product_family_name, so.prov_product, so2.prov_product) AS product
+	,COALESCE(so.prod_type, so.prov_product, so2.prod_type, so2.prov_product) AS prov_product
+	,NULL as product_instance_id
+	,NULL as functional_group
+	,COALESCE(so.current_working_task, so2.current_working_task) AS current_working_task
+	,COALESCE(k.cust_commit_dt, so.CUST_COMMIT_DT, so2.CUST_COMMIT_DT) AS cust_commit_dt
+	,COALESCE(k.bandwidth, so.bandwidth, so2.bandwidth) AS bandwidth
+	,h.sales_region
+	,CASE 
+		WHEN COALESCE(so.prod_type, so.prov_product, so2.prod_type, so2.prov_product) LIKE '%VPN%'
+			THEN 'ghost'
+		ELSE 'hybrid'
+		END AS source
+	,cast(0 AS BIT) AS is_primary
+	,h.is_wip
+	,h.date_loaded
+FROM #hybrids h
+	LEFT OUTER JOIN #omc so ON h.hybridson = so.SERVICE_ORDER
+	LEFT OUTER JOIN #omc so2 ON h.hybridson = so2.SRVC_ORDER_UNIT
+	LEFT OUTER JOIN #kmart k ---THIS MAY NEED TO BE VW_K_MART_DAILY_W_METASOLV_LATAM									
+		ON h.hybridSON = k.srvc_order_unit
+WHERE (	h.hybridOEsystem <> 'tw telecom' OR h.hybridoesystem IS NULL)
+
+UNION
+
+SELECT distinct
+	h.order_number
+	,h.primary_order_item
+	,h.order_item
+	,h.OMC_primary_order_item
+	,so.srvc_order_unit AS omc_order_item
+	,h.hybridSON AS OMC_service_order
+	,coalesce(k.source_system, so.data_src_cd, h.hybridOEsystem, h.source_system) AS source_system
+	,0 as unified_mrr
+	,h.managed_srvcs_flag
+	,h.product_family_name
+	,COALESCE(k.product_family_name, so.prov_product) AS product
+	,so.prov_product AS prov_product
+	,NULL as product_instance_id
+	,NULL as functional_group
+	,so.current_working_task
+	,COALESCE(so.CUST_COMMIT_DT, k.cust_commit_dt) AS cust_commit_dt
+	,COALESCE(k.bandwidth, so.bandwidth) AS bandwidth
+	,h.sales_region
+	,'hybrid' AS source
+	,cast(0 AS BIT) AS is_primary
+	,h.is_wip
+	,h.date_loaded
+FROM #hybrids h
+	LEFT OUTER JOIN #omc so ON h.hybridson = so.ORDER_NUMBER
+	LEFT OUTER JOIN #kmart k 
+		ON so.SRVC_ORDER_UNIT = k.srvc_order_unit
+WHERE (h.hybridOEsystem IN ('tw telecom','Direct DE') 
+	--I'm not sure what this denotes
+	OR left(h.hybridson, 2) = '55');
+
+
+	--Log completion of the job in the job_validation table
+	EXECUTE dbo.sp_jv_update 'usp_related_orders_w_hybrids',1;
+
+END TRY
+
+--Error Logic
+	BEGIN CATCH
+        SET @ErrorNumber	= ERROR_NUMBER();
+		SET @ErrorLine		= ERROR_LINE();
+		SET @ErrorMessage	= ERROR_MESSAGE();
+		SET @ErrorSeverity	= ERROR_SEVERITY();
+		SET @ErrorState		= ERROR_STATE();
+		SET @vOutputError	= 'usp_related_orders_w_hybrids Error: Line '+CAST(@ErrorLine AS VARCHAR(10))+' -- '+CAST(@ErrorNumber AS varchar(10))+' - '+@ErrorMessage;
+		
+        EXEC dbo.sp_jv_update 
+                 @reportname=@vProcessName
+				,@updatetype=1
+				,@iErrorMessage=@vOutputError;
+
+        PRINT 'Actual error number: ' + CAST(@ErrorNumber AS VARCHAR(10));
+        PRINT 'Actual line number: ' + CAST(@ErrorLine AS VARCHAR(10));
+	    PRINT 'ERR MSG: '+ CAST(@ErrorMessage AS VARCHAR(4000));
+  
+        RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
+		
+	END CATCH
+
+END
+
+
+
+
